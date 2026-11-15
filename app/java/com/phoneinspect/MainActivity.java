@@ -21,6 +21,7 @@ import android.view.ViewGroup;
 import android.view.inputmethod.EditorInfo;
 import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
+import android.webkit.WebBackForwardList;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
@@ -239,7 +240,18 @@ public class MainActivity extends Activity {
 
     private void goHome() {
         urlBar.setText("");
-        web.loadDataWithBaseURL(null, HOME, "text/html", "utf-8", null);
+        String u = web.getUrl();
+        if (u == null || u.startsWith("about:") || u.startsWith("data:")) {
+            return; // 已经在主页，不重复压栈
+        }
+        int idx = web.copyBackForwardList().getCurrentIndex();
+        if (idx > 0) {
+            // 历史第一条永远是启动时载入的主页，直接跳回去而不是新开一条，
+            // 否则每点一次「主页」就多一条记录，返回键要按很多次才能退出。
+            web.goBackOrForward(-idx);
+        } else {
+            web.loadDataWithBaseURL(null, HOME, "text/html", "utf-8", null);
+        }
     }
 
     private View buildModeRow() {
