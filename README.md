@@ -52,7 +52,6 @@ PhoneInspect 把拦截搬到 WebView 的原生层，用 `HttpURLConnection` 把�
 **控制台** —— 底部输入框在页面上下文执行 JS，结果显示为紫色 `[eval]` 日志。用 `eval` 而不是函数包裹，`return` 和局部变量声明都是正常语义。
 
 ## 崩溃日志
-
 App 会接管未捕获异常，把堆栈写到 `Android/data/com.phoneinspect/files/crash/`（保留最近 5 份），下次启动时自动出现在「控制台」里，不需要连电脑。
 
 要看实时日志还是得用 adb：
@@ -120,6 +119,8 @@ WebView 拿到"看起来像正常响应"的内容并渲染
 - **缺 `Content-Type` 不能给 `octet-stream`**。HTML 会被当成二进制，页面静默白屏且不报错。要按扩展名兜底再嗅探内容
 - **响应头没 charset 时不能硬编码 utf-8**。国内老站大量是 GBK，得先看 `<meta charset>`，再判断是否合法 UTF-8，都不是才回落 GBK
 - **响应体不能先全读再截断**。`body().bytes()` 会把整个视频流读进内存，得边读边计数、超限立即中断返回 `null`
+- **深色渲染要三个 API 一起关**。`WebView.setForceDarkAllowed(false)` 在部分 WebView 上不生效，还得加 `WebSettings.setForceDark(FORCE_DARK_OFF)`，并给页面注入 `<meta name="color-scheme" content="light">`。否则页面会被当成深色主题渲染：`<p>` 的计算颜色是 `rgb(255,255,255)`，白底黑字的页面直接变成黑底白字
+- **软键盘的回车在部分输入法上会触发两次** `onEditorAction`，一次导航发两遍请求。`go()` 里对同一地址做了 600ms 去抖
 
 ## 已知限制
 

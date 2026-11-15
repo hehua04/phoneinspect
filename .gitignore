@@ -16,3 +16,6 @@ debug.keystore
 # 系统垃圾
 .DS_Store
 Thumbs.db
+
+# 真机验证截图
+.shots/

@@ -64,6 +64,9 @@ public class MainActivity extends Activity {
 
     private static final String JS =
             "(function(){if(window.__PI__)return;window.__PI__=1;"
+            + "try{var mc=document.createElement('meta');mc.name='color-scheme';mc.content='light';"
+            + "(document.head||document.documentElement).appendChild(mc);"
+            + "document.documentElement.style.colorScheme='light';}catch(e){}"
             + "var send=function(l,a){try{var o=[];for(var i=0;i<a.length;i++){var v=a[i];"
             + "try{o.push(v!==null&&typeof v==='object'?JSON.stringify(v):String(v));}catch(e){o.push(String(v));}}"
             + "PI.log(l,o.join(' '));}catch(e){}};"
@@ -476,7 +479,7 @@ public class MainActivity extends Activity {
         tg.setText("面板");
         tg.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
         tg.setTextColor(C_DIM);
-        tg.setPadding(dp(10), dp(5), dp(10), dp(5));
+        tg.setPadding(dp(8), dp(5), dp(6), dp(5));
         tg.setClickable(true);
         tg.setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) {
@@ -493,7 +496,8 @@ public class MainActivity extends Activity {
         c.setText(label);
         c.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
         c.setGravity(Gravity.CENTER);
-        c.setPadding(dp(11), dp(5), dp(11), dp(5));
+        // 6 个胶囊 + 面板要在一行里放得下，左右各 8dp 是实测不截断的临界值
+        c.setPadding(dp(8), dp(5), dp(8), dp(5));
         c.setClickable(true);
         return c;
     }
@@ -502,7 +506,7 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT);
-        p.rightMargin = dp(6);
+        p.rightMargin = dp(5);
         return p;
     }
 
@@ -772,9 +776,15 @@ public class MainActivity extends Activity {
         // 底色必须是白的：WebView 的底色会从透明 body 的页面透出来，
         // 而默认 UA 样式里文字是黑的，深色底会让极简页面变成黑底黑字。
         web.setBackgroundColor(0xFFFFFFFF);
+        // 深色渲染要三管齐下才关得掉，不同 WebView 版本认的 API 不一样：
+        // 1) WebView.setForceDarkAllowed —— 框架新 API
+        // 2) WebSettings.setForceDark —— 已废弃但部分 WebView 只认这个
+        // 3) 注入 <meta name="color-scheme" content="light">（见 JS 开头）
         if (Build.VERSION.SDK_INT >= 29) {
-            // App 主题是深色，Android 13+ 会对 WebView 做算法暗化，把页面颜色反相一部分
             web.setForceDarkAllowed(false);
+            try {
+                s.setForceDark(WebSettings.FORCE_DARK_OFF);
+            } catch (Throwable ignored) { }
         }
         web.addJavascriptInterface(new Bridge(), "PI");
         web.setWebViewClient(new Client());
@@ -909,6 +919,9 @@ public class MainActivity extends Activity {
         web.evaluateJavascript(JS, null);
     }
 
+    private String lastGoUrl = "";
+    private long lastGoAt = 0;
+
     private void go(String input) {
         if (input == null) return;
         String u = input.trim();
@@ -918,6 +931,12 @@ public class MainActivity extends Activity {
                 && !low.startsWith("about:") && !low.startsWith("file:")) {
             u = "https://" + u;
         }
+        // 软键盘的回车在部分输入法上会触发两次 onEditorAction（编辑器动作 + 硬件 ENTER 键），
+        // 表现为一次导航发两遍请求。同一地址短时间只放行一次。
+        long now = System.currentTimeMillis();
+        if (u.equals(lastGoUrl) && now - lastGoAt < 600) return;
+        lastGoUrl = u;
+        lastGoAt = now;
         web.loadUrl(u);
     }
 
