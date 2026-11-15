@@ -210,6 +210,21 @@ public class Replay {
                     rec.chain = chain.toString();
                     pushCookies(current.toString(), resp.headers("Set-Cookie"));
 
+                    // 主文档的原始字节留一份，供「源码 · 原文」视图使用。
+                    // 这是服务器真实输出，比 outerHTML 更可信（注释、缩进、模板都在）。
+                    if (mainFrame && isText(rec.mime)) {
+                        try {
+                            String html = new String(data,
+                                    java.nio.charset.Charset.forName(
+                                            detectCharset(ct, data, rec.mime)));
+                            if (html.length() > 512 * 1024) {
+                                html = html.substring(0, 512 * 1024)
+                                        + "\n\n<!-- 已截断，原始长度 " + html.length() + " 字符 -->";
+                            }
+                            store.setSource(current.toString(), html);
+                        } catch (Throwable ignored) { }
+                    }
+
                     // 先构造再落库：构造器可能对状态码/参数抛异常，
                     // 先 add 会导致同一条记录被 catch 分支再加一遍。
                     WebResourceResponse out = new WebResourceResponse(rec.mime,

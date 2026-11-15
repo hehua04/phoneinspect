@@ -83,6 +83,27 @@ public class Net {
             synchronized (records) { records.clear(); }
         }
 
+        /** 主文档的服务器原始字节解码后的文本，来自拦截层，不是 DOM 序列化 */
+        public volatile String sourceHtml = "";
+        public volatile String sourceUrl = "";
+        /** 元素拾取器回传的格式化文本 */
+        public volatile String elementInfo = "";
+        /** document.documentElement.outerHTML 快照 */
+        public volatile String domHtml = "";
+
+        public void setSource(String url, String html) {
+            sourceUrl = url == null ? "" : url;
+            sourceHtml = html == null ? "" : html;
+        }
+
+        public void setDom(String html) {
+            domHtml = html == null ? "" : html;
+        }
+
+        public void setElement(String text) {
+            elementInfo = text == null ? "" : text;
+        }
+
         public void clearLogs() {
             synchronized (logs) { logs.clear(); }
         }

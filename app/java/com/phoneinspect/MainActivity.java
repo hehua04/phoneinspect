@@ -21,6 +21,7 @@ import android.view.ViewGroup;
 import android.view.inputmethod.EditorInfo;
 import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
+import android.webkit.ValueCallback;
 import android.webkit.WebBackForwardList;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
@@ -34,8 +35,12 @@ import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.ListView;
+import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
+
+import org.json.JSONObject;
+import org.json.JSONTokener;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -63,6 +68,60 @@ public class MainActivity extends Activity {
             + "send('error',['未捕获: '+e.message+' @ '+(e.filename||'')+':'+(e.lineno||0)]);});"
             + "window.addEventListener('unhandledrejection',function(e){"
             + "send('error',['Promise: '+e.reason]);});"
+            + "window.__pi_fmt=function(r){if(r===undefined)return 'undefined';"
+            + "try{return typeof r==='string'?r:JSON.stringify(r);}catch(e){return String(r);}};"
+            + "var ov=null,lastEl=null,sx=0,sy=0,moved=false;"
+            + "function ovl(){if(!ov){ov=document.createElement('div');"
+            + "ov.style.cssText='position:fixed;left:0;top:0;width:0;height:0;pointer-events:none;"
+            + "z-index:2147483647;border:2px solid #4C8DFF;background:rgba(76,141,255,0.18);"
+            + "display:none;box-sizing:border-box';document.documentElement.appendChild(ov);}return ov;}"
+            + "function draw(){if(!lastEl)return;var o=ovl();var r=lastEl.getBoundingClientRect();"
+            + "o.style.display='block';o.style.left=r.left+'px';o.style.top=r.top+'px';"
+            + "o.style.width=r.width+'px';o.style.height=r.height+'px';}"
+            + "function clean(s,n){return (s||'').replace(/\\s+/g,' ').trim().slice(0,n);}"
+            + "function cls(el){var c=el.className;"
+            + "return typeof c==='string'?(c.trim().split(/\\s+/)[0]||''):'';}"
+            + "function path(el){var p=[],n=el,i=0;while(n&&n.nodeType===1&&i<5){"
+            + "var s=n.tagName.toLowerCase();"
+            + "if(n.id){p.unshift(s+'#'+n.id);break;}"
+            + "var c=cls(n);if(c)s+='.'+c;"
+            + "var par=n.parentNode;"
+            + "if(par){var idx=1,sib=par.firstElementChild;while(sib&&sib!==n){"
+            + "if(sib.tagName===n.tagName)idx++;sib=sib.nextElementSibling;}"
+            + "if(idx>1)s+=':nth-of-type('+idx+')';}"
+            + "p.unshift(s);n=n.parentNode;i++;}return p.join(' > ');}"
+            + "function pick(x,y){var el=document.elementFromPoint(x,y);if(!el)return;"
+            + "lastEl=el;draw();var r=el.getBoundingClientRect();var cs=getComputedStyle(el);"
+            + "var o={tag:el.tagName.toLowerCase(),id:el.id||'',"
+            + "cls:(typeof el.className==='string'?el.className:''),"
+            + "path:path(el),text:clean(el.textContent,120),"
+            + "rect:Math.round(r.left)+','+Math.round(r.top)+','+Math.round(r.width)+'x'+Math.round(r.height),"
+            + "display:cs.display,position:cs.position,color:cs.color,bg:cs.backgroundColor,"
+            + "fontSize:cs.fontSize,fontWeight:cs.fontWeight,margin:cs.margin,padding:cs.padding,"
+            + "border:cs.borderTopWidth+' '+cs.borderTopStyle+' '+cs.borderTopColor,"
+            + "zIndex:cs.zIndex,overflow:cs.overflow,opacity:cs.opacity};"
+            + "PI.element(JSON.stringify(o));}"
+            + "document.addEventListener('touchstart',function(e){if(!window.__PI_PICK)return;"
+            + "var t=e.touches[0];sx=t.clientX;sy=t.clientY;moved=false;},true);"
+            + "document.addEventListener('touchmove',function(e){if(!window.__PI_PICK)return;"
+            + "var t=e.touches[0];if(Math.abs(t.clientX-sx)>10||Math.abs(t.clientY-sy)>10)moved=true;},true);"
+            + "document.addEventListener('touchend',function(e){if(!window.__PI_PICK)return;"
+            + "if(moved)return;var t=e.changedTouches[0];e.preventDefault();e.stopPropagation();"
+            + "pick(t.clientX,t.clientY);},true);"
+            + "document.addEventListener('click',function(e){if(!window.__PI_PICK)return;"
+            + "e.preventDefault();e.stopPropagation();e.stopImmediatePropagation();},true);"
+            + "window.addEventListener('scroll',function(){draw();},true);"
+            + "window.addEventListener('resize',function(){draw();},true);"
+            + "window.__PI_PICK=false;"
+            + "window.__PI_SETPICK=function(on){window.__PI_PICK=!!on;"
+            + "if(!on&&ov)ov.style.display='none';};"
+            + "window.__PI_DOM=function(){var s='';"
+            + "try{s=document.documentElement.outerHTML||'';}catch(e){s='';}"
+            + "var total=s.length;var MAX=800000;"
+            + "if(s.length>MAX){s=s.substring(0,MAX)+'\\n\\n<!-- 已截断，实际 '+total+' 字符 -->';}"
+            + "PI.domReset();var SZ=60000;"
+            + "for(var i=0;i<s.length;i+=SZ){PI.domChunk(s.substr(i,SZ));}"
+            + "PI.domDone();};"
             + "})();";
 
     private static final String HOME =
@@ -85,22 +144,37 @@ public class MainActivity extends Activity {
             + "<div class=card><div class=t>关闭</div><div class=d>完全等同普通浏览器，"
             + "用于确认问题是否由拦截本身引起。</div></div>"
             + "<div class=card><div class=t>控制台</div><div class=d>自动注入钩子，捕获 console、"
-            + "未捕获异常与 Promise 拒绝。</div></div>"
+            + "未捕获异常与 Promise 拒绝；底部输入框可直接在页面里执行 JS。</div></div>"
+            + "<div class=card><div class=t>元素</div><div class=d>点「开始拾取」后点页面元素，"
+            + "看标签、选择器路径、尺寸和关键样式，高亮框跟随滚动。</div></div>"
+            + "<div class=card><div class=t>源码</div><div class=d>「原文」是服务器返回的原始字节，"
+            + "「DOM」是 JS 执行后的序列化结果，两者对照能看出页面被改了什么。</div></div>"
             + "</body></html>";
 
     private WebView web;
     private EditText urlBar;
     private LinearLayout panel;
-    private ListView list;
-    private TextView tabNet, tabLog, tabInfo;
+
+    private TextView tabNet, tabLog, tabElem, tabSrc, tabInfo;
+    private TextView btnClear, btnExport, btnPick;
+    private TextView elemText, srcText, chipRaw, chipDom, infoBody;
+    private LinearLayout logView, elementView, sourceView;
+    private View infoView;
+    private ListView netList, logList;
+    private EditText evalInput;
+    private PanelAdapter netAdapter, logAdapter;
+
     private TextView[] modeChip;
     private TextView[] protoChip;
-    private PanelAdapter adapter;
+
+    private final StringBuilder domBuf = new StringBuilder();
 
     private final Net.Store store = Net.Store.get();
     private int mode = Net.MODE_INTERCEPT;
     private int proto = Net.PROTO_AUTO;
     private int tab = PanelAdapter.TAB_NET;
+    private boolean pickOn = false;
+    private boolean srcDom = false;
 
     @Override
     protected void onCreate(Bundle b) {
@@ -127,9 +201,6 @@ public class MainActivity extends Activity {
 
         panel = buildPanel();
         root.addView(panel, lp(LinearLayout.LayoutParams.MATCH_PARENT, panelHeight()));
-
-        adapter = new PanelAdapter(this);
-        list.setAdapter(adapter);
 
         store.netListener = new Runnable() {
             public void run() { scheduleRefresh(); }
@@ -348,17 +419,29 @@ public class MainActivity extends Activity {
         LinearLayout head = new LinearLayout(this);
         head.setOrientation(LinearLayout.HORIZONTAL);
         head.setGravity(Gravity.CENTER_VERTICAL);
-        head.setPadding(dp(6), 0, dp(6), 0);
+        head.setPadding(dp(6), 0, dp(4), 0);
+
+        HorizontalScrollView hs = new HorizontalScrollView(this);
+        hs.setHorizontalScrollBarEnabled(false);
+        LinearLayout tabs = new LinearLayout(this);
+        tabs.setOrientation(LinearLayout.HORIZONTAL);
+        tabs.setGravity(Gravity.CENTER_VERTICAL);
 
         tabNet = tabBtn(PanelAdapter.TAB_NET);
         tabLog = tabBtn(PanelAdapter.TAB_LOG);
+        tabElem = tabBtn(PanelAdapter.TAB_ELEM);
+        tabSrc = tabBtn(PanelAdapter.TAB_SRC);
         tabInfo = tabBtn(PanelAdapter.TAB_INFO);
-        head.addView(tabNet);
-        head.addView(tabLog);
-        head.addView(tabInfo);
-        head.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1f));
+        tabs.addView(tabNet);
+        tabs.addView(tabLog);
+        tabs.addView(tabElem);
+        tabs.addView(tabSrc);
+        tabs.addView(tabInfo);
+        hs.addView(tabs);
+        head.addView(hs, new LinearLayout.LayoutParams(0,
+                LinearLayout.LayoutParams.MATCH_PARENT, 1f));
 
-        TextView clr = smallBtn("清空", new Runnable() {
+        btnClear = smallBtn("清空", new Runnable() {
             public void run() {
                 store.clearRecords();
                 store.clearLogs();
@@ -366,22 +449,24 @@ public class MainActivity extends Activity {
                 Toast.makeText(MainActivity.this, "已清空", Toast.LENGTH_SHORT).show();
             }
         });
-        TextView exp = smallBtn("导出", new Runnable() {
+        btnExport = smallBtn("导出", new Runnable() {
             public void run() { exportAll(); }
         });
-        head.addView(clr);
-        head.addView(exp);
+        head.addView(btnClear);
+        head.addView(btnExport);
 
         p.addView(head, lp(LinearLayout.LayoutParams.MATCH_PARENT, dp(40)));
 
-        list = new ListView(this);
-        list.setBackgroundColor(C_BG);
-        list.setDivider(new ColorDrawable(C_LINE));
-        list.setDividerHeight(1);
-        list.setSelector(new ColorDrawable(0x22FFFFFF));
-        list.setOnItemClickListener(new AdapterView.OnItemClickListener() {
+        FrameLayout content = new FrameLayout(this);
+        p.addView(content, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+
+        netList = newList();
+        netAdapter = new PanelAdapter(this);
+        netAdapter.setTab(PanelAdapter.TAB_NET);
+        netList.setAdapter(netAdapter);
+        netList.setOnItemClickListener(new AdapterView.OnItemClickListener() {
             public void onItemClick(AdapterView<?> a, View v, int pos, long id) {
-                if (tab != PanelAdapter.TAB_NET) return;
                 Net.Record r;
                 synchronized (store.records) {
                     if (pos >= store.records.size()) return;
@@ -390,9 +475,187 @@ public class MainActivity extends Activity {
                 Detail.show(MainActivity.this, r);
             }
         });
-        p.addView(list, new LinearLayout.LayoutParams(
+        content.addView(netList, full());
+
+        logView = new LinearLayout(this);
+        logView.setOrientation(LinearLayout.VERTICAL);
+        logView.setBackgroundColor(C_BG);
+        logList = newList();
+        logAdapter = new PanelAdapter(this);
+        logAdapter.setTab(PanelAdapter.TAB_LOG);
+        logList.setAdapter(logAdapter);
+        logView.addView(logList, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        logView.addView(buildEvalRow(), lp(LinearLayout.LayoutParams.MATCH_PARENT, dp(44)));
+        content.addView(logView, full());
+
+        elementView = buildElementView();
+        content.addView(elementView, full());
+
+        sourceView = buildSourceView();
+        content.addView(sourceView, full());
+
+        infoView = buildInfoView();
+        content.addView(infoView, full());
+
         return p;
+    }
+
+    private ListView newList() {
+        ListView l = new ListView(this);
+        l.setBackgroundColor(C_BG);
+        l.setDivider(new ColorDrawable(C_LINE));
+        l.setDividerHeight(1);
+        l.setSelector(new ColorDrawable(0x22FFFFFF));
+        return l;
+    }
+
+    private FrameLayout.LayoutParams full() {
+        return new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT);
+    }
+
+    private View buildEvalRow() {
+        LinearLayout r = new LinearLayout(this);
+        r.setOrientation(LinearLayout.HORIZONTAL);
+        r.setGravity(Gravity.CENTER_VERTICAL);
+        r.setBackgroundColor(C_SURF);
+        r.setPadding(dp(8), dp(4), dp(6), dp(4));
+
+        evalInput = new EditText(this);
+        evalInput.setSingleLine(true);
+        evalInput.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
+        evalInput.setTextColor(C_TEXT);
+        evalInput.setHintTextColor(0xFF5A6270);
+        evalInput.setHint("在页面里执行 JS，如 document.title");
+        evalInput.setInputType(InputType.TYPE_CLASS_TEXT
+                | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        evalInput.setImeOptions(EditorInfo.IME_ACTION_GO);
+        evalInput.setBackground(round(0xFF12141A, 8));
+        evalInput.setPadding(dp(10), 0, dp(10), 0);
+        evalInput.setOnEditorActionListener(new TextView.OnEditorActionListener() {
+            public boolean onEditorAction(TextView v, int id, KeyEvent e) {
+                runEval();
+                return true;
+            }
+        });
+        r.addView(evalInput, new LinearLayout.LayoutParams(0, dp(34), 1f));
+
+        TextView run = smallBtn("运行", new Runnable() {
+            public void run() { runEval(); }
+        });
+        run.setTextColor(C_ACC);
+        r.addView(run);
+        return r;
+    }
+
+    private LinearLayout buildElementView() {
+        LinearLayout v = new LinearLayout(this);
+        v.setOrientation(LinearLayout.VERTICAL);
+        v.setBackgroundColor(C_BG);
+
+        LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.HORIZONTAL);
+        bar.setGravity(Gravity.CENTER_VERTICAL);
+        bar.setBackgroundColor(C_SURF);
+        bar.setPadding(dp(10), 0, dp(8), 0);
+
+        btnPick = smallBtn("开始拾取", new Runnable() {
+            public void run() { togglePick(); }
+        });
+        btnPick.setBackground(round(0xFF232830, 6));
+        btnPick.setTextColor(C_TEXT);
+        btnPick.setPadding(dp(10), dp(5), dp(10), dp(5));
+        bar.addView(btnPick);
+
+        TextView hint = new TextView(this);
+        hint.setText("点页面元素即可选中，可正常滚动");
+        hint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f);
+        hint.setTextColor(C_DIM);
+        hint.setSingleLine(true);
+        hint.setPadding(dp(10), 0, 0, 0);
+        bar.addView(hint, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        v.addView(bar, lp(LinearLayout.LayoutParams.MATCH_PARENT, dp(40)));
+
+        ScrollView sc = new ScrollView(this);
+        elemText = monoText();
+        sc.addView(elemText);
+        v.addView(sc, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        return v;
+    }
+
+    private LinearLayout buildSourceView() {
+        LinearLayout v = new LinearLayout(this);
+        v.setOrientation(LinearLayout.VERTICAL);
+        v.setBackgroundColor(C_BG);
+
+        LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.HORIZONTAL);
+        bar.setGravity(Gravity.CENTER_VERTICAL);
+        bar.setBackgroundColor(C_SURF);
+        bar.setPadding(dp(10), 0, dp(6), 0);
+
+        chipRaw = chip("原文");
+        chipRaw.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View x) { setSrcMode(false); }
+        });
+        chipDom = chip("DOM");
+        chipDom.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View x) { setSrcMode(true); }
+        });
+        bar.addView(chipRaw, chipLp());
+        bar.addView(chipDom, chipLp());
+        bar.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1f));
+
+        bar.addView(smallBtn("刷新", new Runnable() {
+            public void run() {
+                if (srcDom) captureDom();
+                else {
+                    renderSource();
+                    Toast.makeText(MainActivity.this, "原文来自最近一次拦截的主文档",
+                            Toast.LENGTH_SHORT).show();
+                }
+            }
+        }));
+        bar.addView(smallBtn("复制", new Runnable() {
+            public void run() {
+                Detail.copy(MainActivity.this, srcText.getText().toString());
+            }
+        }));
+        v.addView(bar, lp(LinearLayout.LayoutParams.MATCH_PARENT, dp(40)));
+
+        ScrollView sc = new ScrollView(this);
+        srcText = monoText();
+        sc.addView(srcText);
+        v.addView(sc, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        return v;
+    }
+
+    private ScrollView buildInfoView() {
+        ScrollView sc = new ScrollView(this);
+        sc.setBackgroundColor(C_BG);
+        infoBody = new TextView(this);
+        infoBody.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+        infoBody.setTextColor(0xFFB4BAC4);
+        infoBody.setPadding(dp(14), dp(14), dp(14), dp(14));
+        infoBody.setLineSpacing(dp(4), 1f);
+        infoBody.setTextIsSelectable(true);
+        sc.addView(infoBody);
+        return sc;
+    }
+
+    private TextView monoText() {
+        TextView t = new TextView(this);
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f);
+        t.setTypeface(Typeface.MONOSPACE);
+        t.setTextColor(C_TEXT);
+        t.setPadding(dp(14), dp(12), dp(14), dp(12));
+        t.setTextIsSelectable(true);
+        t.setLineSpacing(dp(3), 1f);
+        return t;
     }
 
     private void setupWeb() {
@@ -434,6 +697,7 @@ public class MainActivity extends Activity {
         }
 
         public void onPageStarted(WebView v, String u, Bitmap f) {
+            resetPick();
             setUrlText(u);
             inject();
         }
@@ -487,6 +751,42 @@ public class MainActivity extends Activity {
             l.level = level == null || level.length() == 0 ? "log" : level;
             l.msg = msg == null ? "" : msg;
             store.addLog(l);
+        }
+
+        @JavascriptInterface
+        public void element(String json) {
+            final String text = formatElement(json);
+            store.setElement(text);
+            store.main.post(new Runnable() {
+                public void run() {
+                    if (tab == PanelAdapter.TAB_ELEM) elemText.setText(text);
+                }
+            });
+        }
+
+        @JavascriptInterface
+        public void domReset() {
+            synchronized (domBuf) { domBuf.setLength(0); }
+        }
+
+        @JavascriptInterface
+        public void domChunk(String s) {
+            if (s == null) return;
+            synchronized (domBuf) {
+                if (domBuf.length() < 900000) domBuf.append(s);
+            }
+        }
+
+        @JavascriptInterface
+        public void domDone() {
+            final String s;
+            synchronized (domBuf) { s = domBuf.toString(); }
+            store.setDom(s);
+            store.main.post(new Runnable() {
+                public void run() {
+                    if (tab == PanelAdapter.TAB_SRC && srcDom) srcText.setText(s);
+                }
+            });
         }
     }
 
@@ -551,24 +851,205 @@ public class MainActivity extends Activity {
     }
 
     private void setTab(int t) {
+        if (t != PanelAdapter.TAB_ELEM && pickOn) togglePick();
         tab = t;
-        TextView[] tabs = {tabNet, tabLog, tabInfo};
-        for (int i = 0; i < 3; i++) {
-            boolean on = (i == t);
+
+        TextView[] tabs = {tabNet, tabLog, tabElem, tabSrc, tabInfo};
+        int[] ids = {PanelAdapter.TAB_NET, PanelAdapter.TAB_LOG, PanelAdapter.TAB_ELEM,
+                PanelAdapter.TAB_SRC, PanelAdapter.TAB_INFO};
+        for (int i = 0; i < tabs.length; i++) {
+            boolean on = (ids[i] == t);
             tabs[i].setTextColor(on ? C_ACC : C_DIM);
             tabs[i].setTypeface(on ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
             tabs[i].setBackground(round(on ? 0xFF232830 : 0x00000000, 6));
         }
-        if (t == PanelAdapter.TAB_INFO) adapter.setInfo(infoText());
-        adapter.setTab(t);
+
+        netList.setVisibility(t == PanelAdapter.TAB_NET ? View.VISIBLE : View.GONE);
+        logView.setVisibility(t == PanelAdapter.TAB_LOG ? View.VISIBLE : View.GONE);
+        elementView.setVisibility(t == PanelAdapter.TAB_ELEM ? View.VISIBLE : View.GONE);
+        sourceView.setVisibility(t == PanelAdapter.TAB_SRC ? View.VISIBLE : View.GONE);
+        infoView.setVisibility(t == PanelAdapter.TAB_INFO ? View.VISIBLE : View.GONE);
+
+        btnClear.setVisibility(t == PanelAdapter.TAB_NET || t == PanelAdapter.TAB_LOG
+                ? View.VISIBLE : View.GONE);
+        btnExport.setVisibility(t == PanelAdapter.TAB_NET ? View.VISIBLE : View.GONE);
+
+        if (t == PanelAdapter.TAB_ELEM) renderElement();
+        if (t == PanelAdapter.TAB_SRC) setSrcMode(srcDom);
+        if (t == PanelAdapter.TAB_INFO) infoBody.setText(infoText());
+
         refreshCounts();
     }
 
     private void refreshCounts() {
         tabNet.setText("网络 " + store.recordCount());
         tabLog.setText("控制台 " + store.logCount());
-        if (tab == PanelAdapter.TAB_INFO) adapter.setInfo(infoText());
-        adapter.notifyDataSetChanged();
+        if (netAdapter != null) netAdapter.notifyDataSetChanged();
+        if (logAdapter != null) logAdapter.notifyDataSetChanged();
+    }
+
+    // ---- 元素拾取 ----
+
+    private void togglePick() {
+        pickOn = !pickOn;
+        applyPick();
+    }
+
+    private void applyPick() {
+        if (web != null) {
+            web.evaluateJavascript("window.__PI_SETPICK&&window.__PI_SETPICK("
+                    + (pickOn ? "true" : "false") + ");", null);
+        }
+        updatePickBtn();
+    }
+
+    private void updatePickBtn() {
+        if (btnPick == null) return;
+        btnPick.setText(pickOn ? "停止拾取" : "开始拾取");
+        btnPick.setTextColor(pickOn ? 0xFF0F1115 : C_TEXT);
+        btnPick.setBackground(round(pickOn ? C_ACC : 0xFF232830, 6));
+    }
+
+    /** 页面换文档后注入的脚本被重置，拾取状态要跟着复位，否则按钮显示与实际不符 */
+    private void resetPick() {
+        if (!pickOn) return;
+        pickOn = false;
+        updatePickBtn();
+    }
+
+    private void renderElement() {
+        if (elemText == null) return;
+        String s = store.elementInfo;
+        elemText.setText(s == null || s.length() == 0
+                ? "点「开始拾取」，再点页面上的元素。\n\n"
+                + "· 拾取模式下页面不会响应点击，但可以正常滚动\n"
+                + "· 点「停止拾取」恢复页面的正常交互\n"
+                + "· 跨域 iframe 里的元素选不进去（同源可以）\n"
+                + "· 高亮框会跟随滚动和缩放重算位置"
+                : s);
+    }
+
+    // ---- 源码 ----
+
+    private void setSrcMode(boolean dom) {
+        srcDom = dom;
+        if (chipRaw != null) {
+            chipRaw.setTextColor(dom ? C_DIM : 0xFF0F1115);
+            chipRaw.setBackground(round(dom ? 0x00000000 : C_ACC, 6));
+            chipDom.setTextColor(dom ? 0xFF0F1115 : C_DIM);
+            chipDom.setBackground(round(dom ? C_ACC : 0x00000000, 6));
+        }
+        if (dom && (store.domHtml == null || store.domHtml.length() == 0)) {
+            captureDom();
+            return;
+        }
+        renderSource();
+    }
+
+    private void renderSource() {
+        if (srcText == null) return;
+        if (srcDom) {
+            String s = store.domHtml;
+            srcText.setText(s == null || s.length() == 0
+                    ? "正在抓取当前 DOM…\n\n"
+                    + "DOM 是 JS 执行后的结果，不含 shadow DOM，input 里的当前输入值"
+                    + "也不会出现在 outerHTML 中。"
+                    : s);
+        } else {
+            String s = store.sourceHtml;
+            srcText.setText(s == null || s.length() == 0
+                    ? "还没有拿到原文。\n\n"
+                    + "原文是拦截层从服务器响应里拿到的原始字节，"
+                    + "需要处于「拦截 GET」模式并刷新一次页面。\n\n"
+                    + "它比 DOM 快照更可信：注释、原始缩进、未被 JS 渲染的模板都在。"
+                    : s);
+        }
+    }
+
+    private void captureDom() {
+        domBuf.setLength(0);
+        renderSource();
+        if (web != null) {
+            web.evaluateJavascript("window.__PI_DOM&&window.__PI_DOM();", null);
+        }
+    }
+
+    // ---- 执行 JS ----
+
+    private void runEval() {
+        if (evalInput == null || web == null) return;
+        final String code = evalInput.getText().toString().trim();
+        if (code.length() == 0) return;
+        evalInput.setText("");
+
+        String lit;
+        try {
+            lit = JSONObject.quote(code);
+        } catch (Throwable t) {
+            lit = "\"\"";
+        }
+        String js = "(function(){try{var r=eval(" + lit + ");"
+                + "return window.__pi_fmt?window.__pi_fmt(r):String(r);}"
+                + "catch(e){return 'ERROR: '+(e&&e.message?e.message:e);}})()";
+
+        web.evaluateJavascript(js, new ValueCallback<String>() {
+            public void onReceiveValue(String v) {
+                Net.LogItem l = new Net.LogItem();
+                l.level = "eval";
+                l.msg = code + "\n→ " + unescape(v);
+                store.addLog(l);
+            }
+        });
+    }
+
+    private static String unescape(String v) {
+        if (v == null) return "null";
+        try {
+            return String.valueOf(new JSONTokener(v).nextValue());
+        } catch (Throwable t) {
+            return v;
+        }
+    }
+
+    private String formatElement(String json) {
+        try {
+            JSONObject o = new JSONObject(json);
+            StringBuilder sb = new StringBuilder();
+            sb.append('<').append(o.optString("tag")).append('>');
+            String id = o.optString("id");
+            if (id.length() > 0) sb.append("  #").append(id);
+            String cls = o.optString("cls");
+            if (cls.length() > 0) {
+                sb.append("\nclass  ").append(cls);
+            }
+            sb.append("\n\n路径  ").append(o.optString("path"));
+            sb.append("\n位置  ").append(o.optString("rect")).append("   (x, y, 宽x高)");
+            String tx = o.optString("text");
+            if (tx.length() > 0) sb.append("\n文本  ").append(tx);
+
+            sb.append("\n\n── 样式 ──\n");
+            kv(sb, "display", o.optString("display"));
+            kv(sb, "position", o.optString("position"));
+            kv(sb, "color", o.optString("color"));
+            kv(sb, "background", o.optString("bg"));
+            kv(sb, "font-size", o.optString("fontSize"));
+            kv(sb, "font-weight", o.optString("fontWeight"));
+            kv(sb, "margin", o.optString("margin"));
+            kv(sb, "padding", o.optString("padding"));
+            kv(sb, "border", o.optString("border"));
+            kv(sb, "z-index", o.optString("zIndex"));
+            kv(sb, "overflow", o.optString("overflow"));
+            kv(sb, "opacity", o.optString("opacity"));
+            return sb.toString();
+        } catch (Throwable t) {
+            return "解析失败：" + t + "\n\n" + json;
+        }
+    }
+
+    private void kv(StringBuilder sb, String k, String v) {
+        sb.append("  ").append(k);
+        for (int i = k.length(); i < 12; i++) sb.append(' ');
+        sb.append(v).append('\n');
     }
 
     private String infoText() {
@@ -595,6 +1076,9 @@ public class MainActivity extends Activity {
         sb.append("· 超过 4MB 或流媒体不重放，会标为「跳过重放」并交回 WebView，该请求实际会发两次。\n");
         sb.append("· 主文档的 3xx 不由工具跟随，交回 WebView 自己跳，否则页面里的相对路径会解析错。\n");
         sb.append("· 点击列表任意请求查看详情，详情内文字可长按选中。\n");
+        sb.append("· 「元素」tab：开启拾取后点页面元素，可看标签、选择器路径、尺寸和关键样式。\n");
+        sb.append("· 「源码」tab：原文来自拦截层拿到的服务器字节，DOM 是 JS 执行后的序列化结果。\n");
+        sb.append("· 「控制台」底部输入框可直接在页面上下文执行 JS。\n");
         return sb.toString();
     }
 
@@ -660,7 +1144,9 @@ public class MainActivity extends Activity {
     private TextView tabBtn(final int t) {
         TextView tv = new TextView(this);
         tv.setText(t == PanelAdapter.TAB_NET ? "网络 0"
-                : t == PanelAdapter.TAB_LOG ? "控制台 0" : "信息");
+                : t == PanelAdapter.TAB_LOG ? "控制台 0"
+                : t == PanelAdapter.TAB_ELEM ? "元素"
+                : t == PanelAdapter.TAB_SRC ? "源码" : "信息");
         tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
         tv.setGravity(Gravity.CENTER);
         tv.setPadding(dp(9), dp(6), dp(9), dp(6));

@@ -16,11 +16,12 @@ public class PanelAdapter extends BaseAdapter {
     public static final int TAB_NET = 0;
     public static final int TAB_LOG = 1;
     public static final int TAB_INFO = 2;
+    public static final int TAB_ELEM = 3;
+    public static final int TAB_SRC = 4;
 
     private final Context ctx;
     private final Net.Store store = Net.Store.get();
     private int tab = TAB_NET;
-    private String info = "";
 
     public PanelAdapter(Context c) {
         this.ctx = c;
@@ -31,15 +32,10 @@ public class PanelAdapter extends BaseAdapter {
         notifyDataSetChanged();
     }
 
-    public void setInfo(String s) {
-        info = s;
-        notifyDataSetChanged();
-    }
-
     public int getCount() {
         if (tab == TAB_NET) return store.recordCount();
         if (tab == TAB_LOG) return store.logCount();
-        return 1;
+        return 0;
     }
 
     public Object getItem(int p) { return null; }
@@ -68,10 +64,8 @@ public class PanelAdapter extends BaseAdapter {
 
         if (tab == TAB_NET) {
             bindNet(h, pos);
-        } else if (tab == TAB_LOG) {
-            bindLog(h, pos);
         } else {
-            h.text.setText(info);
+            bindLog(h, pos);
         }
         return cv;
     }
@@ -110,16 +104,9 @@ public class PanelAdapter extends BaseAdapter {
             return row;
         }
 
-        if (tab == TAB_LOG) {
-            h.text = text(11.5f, 0xFFB4BAC4, true);
-            h.text.setPadding(dp(12), dp(6), dp(12), dp(6));
-            h.text.setTextIsSelectable(true);
-            return h.text;
-        }
-
-        h.text = text(11.5f, 0xFFB4BAC4, false);
-        h.text.setPadding(dp(14), dp(14), dp(14), dp(14));
-        h.text.setLineSpacing(dp(4), 1f);
+        h.text = text(11.5f, 0xFFB4BAC4, true);
+        h.text.setPadding(dp(12), dp(6), dp(12), dp(6));
+        h.text.setTextIsSelectable(true);
         return h.text;
     }
 
@@ -178,6 +165,7 @@ public class PanelAdapter extends BaseAdapter {
         if ("error".equals(level)) return 0xFFFF6B6B;
         if ("warn".equals(level)) return 0xFFFFB454;
         if ("info".equals(level)) return 0xFF7FB0FF;
+        if ("eval".equals(level)) return 0xFFB8A1FF;
         return 0xFFB4BAC4;
     }
 
