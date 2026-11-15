@@ -1,0 +1,18 @@
+# Android SDK（bootstrap.sh 会下载到 sdk/，不入库）
+sdk/
+sdk_dl/
+repo.xml
+
+# 构建中间产物
+build/
+*.idsig
+
+# 调试签名，bootstrap/build 首次运行会自动生成
+debug.keystore
+
+# 会话数据
+.workbuddy/
+
+# 系统垃圾
+.DS_Store
+Thumbs.db
