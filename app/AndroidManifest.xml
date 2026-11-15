@@ -1,8 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.phoneinspect"
-    android:versionCode="1"
-    android:versionName="1.0">
+    package="com.phoneinspect">
+    <!-- versionCode / versionName 由 build.sh 从 version.properties 注入，这里不写死 -->
 
     <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="34" />
 

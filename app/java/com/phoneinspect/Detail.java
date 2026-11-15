@@ -49,7 +49,7 @@ public class Detail {
         try {
             ClipboardManager cm = (ClipboardManager) c.getSystemService(Context.CLIPBOARD_SERVICE);
             cm.setPrimaryClip(ClipData.newPlainText("phoneinspect", s));
-            Toast.makeText(c, "已复制", Toast.LENGTH_SHORT).show();
+            Toast.makeText(c, "已复制到剪贴板", Toast.LENGTH_SHORT).show();
         } catch (Throwable t) {
             Toast.makeText(c, "复制失败", Toast.LENGTH_SHORT).show();
         }
@@ -58,9 +58,14 @@ public class Detail {
     private static String build(Net.Record r) {
         StringBuilder sb = new StringBuilder();
 
+        sb.append("注意：以下内容含 Cookie 等敏感信息，复制后请勿粘贴到公开场合。\n\n");
+
         head(sb, "请求");
         sb.append(r.method).append(' ').append(r.url).append('\n');
         if (r.mainFrame) sb.append("(主文档请求)\n");
+        if (r.finalUrl != null && r.finalUrl.length() > 0 && !r.finalUrl.equals(r.url)) {
+            sb.append("最终地址: ").append(r.finalUrl).append('\n');
+        }
         sb.append('\n');
 
         head(sb, "请求头");
@@ -72,8 +77,8 @@ public class Detail {
         if (r.cost > 0) sb.append("    ").append(r.cost).append("ms");
         if (r.size > 0) sb.append("    ").append(r.size).append(" bytes");
         sb.append('\n');
-        if (r.status >= 0 && "HTTP/1.1".equals(proto)) {
-            sb.append("(这是重放连接的协议；浏览器直连时可能是 HTTP/2)\n");
+        if (r.note != null && r.note.length() > 0) {
+            sb.append("说明: ").append(r.note).append('\n');
         }
         sb.append('\n');
 

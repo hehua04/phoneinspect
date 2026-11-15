@@ -25,6 +25,8 @@ public class Net {
         public String bodyPreview = "";
         public String mime = "";
         public String protocol = "";
+        public String finalUrl = "";
+        public String note = "";
         public int status = -1;
         public long cost = 0;
         public long size = 0;
@@ -42,7 +44,7 @@ public class Net {
 
         private static Store INSTANCE;
 
-        public static Store get() {
+        public static synchronized Store get() {
             if (INSTANCE == null) INSTANCE = new Store();
             return INSTANCE;
         }

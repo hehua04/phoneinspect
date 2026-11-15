@@ -46,6 +46,17 @@ adb install -r PhoneInspect.apk
 
 minSdk 26（Android 8+），无原生库，不分 32/64 位。
 
+## 版本
+
+版本号唯一来源是 `version.properties`，`build.sh` 读它并通过 `aapt2 --version-code/--version-name` 注入，清单里不写死，避免两处漂移。
+
+```
+versionCode=2
+versionName=1.1.0
+```
+
+改完直接 `bash build.sh`，App 内「信息」面板会显示当前安装的版本。每次发版记得 `versionCode` +1。
+
 ## 构建
 
 不需要 Gradle，也不需要 Android Studio。工具链是 `aapt2 + javac + d8 + zipalign + apksigner`。
@@ -74,10 +85,15 @@ WebView 拿到"看起来像正常响应"的内容并渲染
 
 几个必须踩过才知道的坑，代码里都处理了：
 
-- 重发时**丢掉** `Accept-Encoding`，交给 HttpURLConnection 自动协商并解压
+- **`getRequestHeaders()` 默认不含 Cookie**。WebView 故意不把它放进请求头，必须自己 `CookieManager.getCookie(url)` 取；而且每一跳都要重新取，跳转后域名和路径变了才是正确的那份
+- 重发时**丢掉** `Accept-Encoding`，交给 OkHttp 自动协商并解压
 - 重发时**丢掉** `If-None-Match` / `If-Modified-Since`，否则服务端返回 304 空包，页面直接白屏
 - 回给 WebView 的头**必须删掉** `Content-Length` / `Content-Encoding` / `Transfer-Encoding`，因为 body 已被解压，长度和原头对不上会导致渲染失败
 - `Set-Cookie` 不能靠响应头传给 WebView，要逐条写进 `CookieManager` 再 `flush()`
+- **主文档的 3xx 不能替 WebView 跟随**。文档 URL 是 Chromium 按它请求的 URL 定的，替它跳完它还以为在原地，页面里所有相对路径都会解析错。子资源可以跟随，主文档必须原样交回
+- **缺 `Content-Type` 不能给 `octet-stream`**。HTML 会被当成二进制，页面静默白屏且不报错。要按扩展名兜底再嗅探内容
+- **响应头没 charset 时不能硬编码 utf-8**。国内老站大量是 GBK，得先看 `<meta charset>`，再判断是否合法 UTF-8，都不是才回落 GBK
+- **响应体不能先全读再截断**。`body().bytes()` 会把整个视频流读进内存，得边读边计数、超限立即中断返回 `null`
 
 ## 已知限制
 
@@ -85,6 +101,10 @@ WebView 拿到"看起来像正常响应"的内容并渲染
 - **h2 只是"能连"，不是"等同浏览器"**。`shouldInterceptRequest` 是每请求一次阻塞调用，单例 OkHttpClient 的连接池能复用连接、多路复用流，但 h2 优先级、流依赖、103 Early Hints 这些调度行为拿不回来。
 - **协议只管被拦截的请求**。POST、WebSocket、Service Worker 不走这里，仍然由 WebView 自己决定协议。
 - **拿不到 POST 请求体**。`WebResourceRequest` 不提供 body，所以非 GET 请求只记录 URL 和请求头、不重发。
+- **超过 4MB 或流媒体不重放**。标为「跳过重放」并返回 `null` 交给 WebView，这类资源实际会下载两次。
+- **iframe 里的 console 收不到**。`evaluateJavascript` 只作用于主 frame，跨域 iframe 的日志拿不到。
+- **JS 桥 `PI` 对所有页面开放**。恶意页面理论上能刷日志（有 500 条上限，风险很低）。只在调试自己的站点时用。
+- **导出写文件不写剪贴板**。记录含 `Set-Cookie`，剪贴板对其它 App 可读。文件落在 `Android/data/com.phoneinspect/files/export/`。
 - 每个 GET 多一次往返，请求多的页面会变慢。
 - 记录只存在内存里，切后台被回收就没了，最多保留 400 条。
 

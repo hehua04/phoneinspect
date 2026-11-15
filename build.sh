@@ -36,6 +36,12 @@ if [ ! -f "$AJAR" ] || [ ! -d "$BT" ]; then
 fi
 
 echo "==> 清理"
+VFILE="$ROOT/version.properties"
+if [ ! -f "$VFILE" ]; then echo "!! 缺少 version.properties"; exit 1; fi
+VC="$(grep -E '^versionCode=' "$VFILE" | head -1 | cut -d= -f2 | tr -d ' \r')"
+VN="$(grep -E '^versionName=' "$VFILE" | head -1 | cut -d= -f2 | tr -d ' \r')"
+if [ -z "$VC" ] || [ -z "$VN" ]; then echo "!! version.properties 格式不对"; exit 1; fi
+echo "    版本：$VN ($VC)"
 rm -rf "$OUT"
 mkdir -p "$OUT/dex"
 
@@ -44,6 +50,7 @@ echo "==> 1/6 编译资源"
 
 echo "==> 2/6 链接资源与清单"
 "$BT/aapt2$EXE" link -o "$OUT/base.apk" -I "$AJAR" \
+  --version-code "$VC" --version-name "$VN" \
   --manifest "$APP/AndroidManifest.xml" "$OUT/res.zip" || exit 1
 
 echo "==> 3/6 编译 Java"

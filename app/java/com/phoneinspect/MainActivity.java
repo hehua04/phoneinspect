@@ -1,10 +1,13 @@
 package com.phoneinspect;
 
 import android.app.Activity;
+import android.content.pm.PackageInfo;
+import android.content.res.Configuration;
 import android.graphics.Bitmap;
 import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
+import android.os.Build;
 import android.os.Bundle;
 import android.text.InputType;
 import android.text.TextUtils;
@@ -30,6 +33,9 @@ import android.widget.ListView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.OutputStreamWriter;
 import java.util.Map;
 
 public class MainActivity extends Activity {
@@ -95,6 +101,9 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
+        // 自己就是调试工具，开着让 chrome://inspect 也能接进来做对照
+        WebView.setWebContentsDebuggingEnabled(true);
+
         getWindow().setStatusBarColor(C_BG);
         getWindow().setNavigationBarColor(C_BG);
         getWindow().setBackgroundDrawable(new ColorDrawable(C_BG));
@@ -113,17 +122,16 @@ public class MainActivity extends Activity {
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
 
         panel = buildPanel();
-        int ph = (int) (getResources().getDisplayMetrics().heightPixels * 0.40f);
-        root.addView(panel, lp(LinearLayout.LayoutParams.MATCH_PARENT, ph));
+        root.addView(panel, lp(LinearLayout.LayoutParams.MATCH_PARENT, panelHeight()));
 
         adapter = new PanelAdapter(this);
         list.setAdapter(adapter);
 
         store.netListener = new Runnable() {
-            public void run() { refreshCounts(); }
+            public void run() { scheduleRefresh(); }
         };
         store.logListener = new Runnable() {
-            public void run() { refreshCounts(); }
+            public void run() { scheduleRefresh(); }
         };
 
         CookieManager.getInstance().setAcceptCookie(true);
@@ -131,6 +139,20 @@ public class MainActivity extends Activity {
         setProto(Net.PROTO_AUTO, false);
         setTab(PanelAdapter.TAB_NET);
     }
+
+    private int panelHeight() {
+        return (int) (getResources().getDisplayMetrics().heightPixels * 0.40f);
+    }
+
+    /** 首屏几十个请求会连续触发回调，合并成 200ms 一次全量刷新 */
+    private void scheduleRefresh() {
+        store.main.removeCallbacks(refreshTask);
+        store.main.postDelayed(refreshTask, 200);
+    }
+
+    private final Runnable refreshTask = new Runnable() {
+        public void run() { refreshCounts(); }
+    };
 
     private View buildBar() {
         LinearLayout bar = new LinearLayout(this);
@@ -333,7 +355,13 @@ public class MainActivity extends Activity {
         s.setDisplayZoomControls(false);
         s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
         s.setCacheMode(WebSettings.LOAD_DEFAULT);
-        web.setBackgroundColor(C_BG);
+        // 底色必须是白的：WebView 的底色会从透明 body 的页面透出来，
+        // 而默认 UA 样式里文字是黑的，深色底会让极简页面变成黑底黑字。
+        web.setBackgroundColor(0xFFFFFFFF);
+        if (Build.VERSION.SDK_INT >= 29) {
+            // App 主题是深色，Android 13+ 会对 WebView 做算法暗化，把页面颜色反相一部分
+            web.setForceDarkAllowed(false);
+        }
         web.addJavascriptInterface(new Bridge(), "PI");
         web.setWebViewClient(new Client());
         web.setWebChromeClient(new WebChromeClient() {
@@ -483,6 +511,7 @@ public class MainActivity extends Activity {
 
     private String infoText() {
         StringBuilder sb = new StringBuilder();
+        sb.append("版本  PhoneInspect ").append(versionText()).append('\n');
         sb.append("设备  ").append(android.os.Build.MANUFACTURER).append(' ')
                 .append(android.os.Build.MODEL).append('\n');
         sb.append("系统  Android ").append(android.os.Build.VERSION.RELEASE)
@@ -501,8 +530,20 @@ public class MainActivity extends Activity {
         sb.append("· POST / PUT 不重发（拿不到请求体），只记录 URL 与请求头。\n");
         sb.append("· 页面出现异常时，切到「仅记录」或「关闭」做对比。\n");
         sb.append("· 协议可随时切换；「仅 HTTP/2」在服务端不支持时会直接失败，正好用来探测有没有开 h2。\n");
+        sb.append("· 超过 4MB 或流媒体不重放，会标为「跳过重放」并交回 WebView，该请求实际会发两次。\n");
+        sb.append("· 主文档的 3xx 不由工具跟随，交回 WebView 自己跳，否则页面里的相对路径会解析错。\n");
         sb.append("· 点击列表任意请求查看详情，详情内文字可长按选中。\n");
         return sb.toString();
+    }
+
+    private String versionText() {
+        try {
+            PackageInfo pi = getPackageManager().getPackageInfo(getPackageName(), 0);
+            long vc = Build.VERSION.SDK_INT >= 28 ? pi.getLongVersionCode() : pi.versionCode;
+            return pi.versionName + " (" + vc + ")";
+        } catch (Throwable t) {
+            return "?";
+        }
     }
 
     private void exportAll() {
@@ -532,7 +573,26 @@ public class MainActivity extends Activity {
             Toast.makeText(this, "还没有记录", Toast.LENGTH_SHORT).show();
             return;
         }
-        Detail.copy(this, sb.toString());
+        // 记录里含 Set-Cookie，写文件而不是塞剪贴板（剪贴板对其它 App 可读）
+        File dir = getExternalFilesDir("export");
+        if (dir == null) {
+            Toast.makeText(this, "无法访问存储目录", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        dir.mkdirs();
+        File f = new File(dir, "phoneinspect-" + System.currentTimeMillis() + ".txt");
+        FileOutputStream fos = null;
+        try {
+            fos = new FileOutputStream(f);
+            OutputStreamWriter w = new OutputStreamWriter(fos, "UTF-8");
+            w.write(sb.toString());
+            w.flush();
+            Toast.makeText(this, "已导出到\n" + f.getAbsolutePath(), Toast.LENGTH_LONG).show();
+        } catch (Throwable t) {
+            Toast.makeText(this, "导出失败：" + t, Toast.LENGTH_SHORT).show();
+        } finally {
+            try { if (fos != null) fos.close(); } catch (Throwable ignored) { }
+        }
     }
 
     private TextView tabBtn(final int t) {
@@ -597,7 +657,21 @@ public class MainActivity extends Activity {
             web.goBack();
             return;
         }
+        if (panel != null && panel.getVisibility() == View.VISIBLE) {
+            panel.setVisibility(View.GONE);
+            return;
+        }
         super.onBackPressed();
+    }
+
+    public void onConfigurationChanged(Configuration cfg) {
+        super.onConfigurationChanged(cfg);
+        // 声明了 configChanges，Activity 不重建，面板高度得自己跟着屏幕重算
+        if (panel != null) {
+            ViewGroup.LayoutParams p = panel.getLayoutParams();
+            p.height = panelHeight();
+            panel.setLayoutParams(p);
+        }
     }
 
     protected void onDestroy() {

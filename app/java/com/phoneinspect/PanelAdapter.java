@@ -46,70 +46,104 @@ public class PanelAdapter extends BaseAdapter {
 
     public long getItemId(int p) { return p; }
 
-    public View getView(int pos, View cv, ViewGroup parent) {
-        if (tab == TAB_NET) return netRow(pos);
-        if (tab == TAB_LOG) return logRow(pos);
-        return infoRow();
+    static class Holder {
+        int type;
+        TextView method;
+        TextView path;
+        TextView status;
+        TextView sub;
+        TextView text;
     }
 
-    private View netRow(int pos) {
+    public View getView(int pos, View cv, ViewGroup parent) {
+        Holder h;
+        if (cv == null || !(cv.getTag() instanceof Holder) || ((Holder) cv.getTag()).type != tab) {
+            h = new Holder();
+            h.type = tab;
+            cv = build(h);
+            cv.setTag(h);
+        } else {
+            h = (Holder) cv.getTag();
+        }
+
+        if (tab == TAB_NET) {
+            bindNet(h, pos);
+        } else if (tab == TAB_LOG) {
+            bindLog(h, pos);
+        } else {
+            h.text.setText(info);
+        }
+        return cv;
+    }
+
+    private View build(Holder h) {
+        if (tab == TAB_NET) {
+            LinearLayout row = new LinearLayout(ctx);
+            row.setOrientation(LinearLayout.VERTICAL);
+            row.setPadding(dp(12), dp(8), dp(12), dp(8));
+
+            LinearLayout top = new LinearLayout(ctx);
+            top.setOrientation(LinearLayout.HORIZONTAL);
+            top.setGravity(Gravity.CENTER_VERTICAL);
+
+            h.method = text(10f, 0xFF8B929E, true);
+            h.method.setWidth(dp(46));
+            top.addView(h.method);
+
+            h.path = text(12.5f, 0xFFE6E8EB, false);
+            h.path.setSingleLine(true);
+            h.path.setEllipsize(TextUtils.TruncateAt.MIDDLE);
+            top.addView(h.path, new LinearLayout.LayoutParams(0,
+                    ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+            h.status = text(10.5f, 0xFF8B929E, true);
+            h.status.setPadding(dp(8), 0, 0, 0);
+            top.addView(h.status);
+
+            row.addView(top);
+
+            h.sub = text(10.5f, 0xFF6E7681, false);
+            h.sub.setSingleLine(true);
+            h.sub.setEllipsize(TextUtils.TruncateAt.END);
+            row.addView(h.sub);
+
+            return row;
+        }
+
+        if (tab == TAB_LOG) {
+            h.text = text(11.5f, 0xFFB4BAC4, true);
+            h.text.setPadding(dp(12), dp(6), dp(12), dp(6));
+            h.text.setTextIsSelectable(true);
+            return h.text;
+        }
+
+        h.text = text(11.5f, 0xFFB4BAC4, false);
+        h.text.setPadding(dp(14), dp(14), dp(14), dp(14));
+        h.text.setLineSpacing(dp(4), 1f);
+        return h.text;
+    }
+
+    private void bindNet(Holder h, int pos) {
         Net.Record r;
         synchronized (store.records) {
-            if (pos >= store.records.size()) return new View(ctx);
+            if (pos >= store.records.size()) return;
             r = store.records.get(pos);
         }
-
-        LinearLayout row = new LinearLayout(ctx);
-        row.setOrientation(LinearLayout.VERTICAL);
-        row.setPadding(dp(12), dp(8), dp(12), dp(8));
-
-        LinearLayout top = new LinearLayout(ctx);
-        top.setOrientation(LinearLayout.HORIZONTAL);
-        top.setGravity(Gravity.CENTER_VERTICAL);
-
-        TextView m = text(r.method, 10f, 0xFF8B929E, true);
-        m.setWidth(dp(46));
-        top.addView(m);
-
-        TextView u = text(pathOf(r.url), 12.5f, 0xFFE6E8EB, false);
-        u.setSingleLine(true);
-        u.setEllipsize(TextUtils.TruncateAt.MIDDLE);
-        top.addView(u, new LinearLayout.LayoutParams(0,
-                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-
-        TextView s = text(statusText(r.status), 10.5f, statusColor(r.status), true);
-        s.setPadding(dp(8), 0, 0, 0);
-        top.addView(s);
-
-        row.addView(top);
-
-        String sub = subOf(r);
-        if (sub.length() > 0) {
-            TextView d = text(sub, 10.5f, 0xFF6E7681, false);
-            d.setSingleLine(true);
-            d.setEllipsize(TextUtils.TruncateAt.END);
-            row.addView(d);
-        }
-        return row;
+        h.method.setText(r.method);
+        h.path.setText(pathOf(r.url));
+        h.status.setText(statusText(r.status));
+        h.status.setTextColor(statusColor(r.status));
+        h.sub.setText(subOf(r));
     }
 
-    private View logRow(int pos) {
+    private void bindLog(Holder h, int pos) {
         Net.LogItem l;
         synchronized (store.logs) {
-            if (pos >= store.logs.size()) return new View(ctx);
+            if (pos >= store.logs.size()) return;
             l = store.logs.get(pos);
         }
-        TextView t = text("[" + l.level + "] " + l.msg, 11.5f, logColor(l.level), true);
-        t.setPadding(dp(12), dp(6), dp(12), dp(6));
-        t.setTextIsSelectable(true);
-        return t;
-    }
-
-    private View infoRow() {
-        TextView t = text(info, 11.5f, 0xFFB4BAC4, false);
-        t.setPadding(dp(14), dp(14), dp(14), dp(14));
-        t.setLineSpacing(dp(4), 1f);
-        return t;
+        h.text.setText("[" + l.level + "] " + l.msg);
+        h.text.setTextColor(logColor(l.level));
     }
 
     private String pathOf(String url) {
@@ -150,12 +184,19 @@ public class PanelAdapter extends BaseAdapter {
     private String subOf(Net.Record r) {
         StringBuilder sb = new StringBuilder();
         if (r.mainFrame) sb.append("主文档");
+
         if (r.status < 0) {
-            return sb.length() > 0 ? sb.append(" · 未拦截").toString() : "未拦截";
+            if (sb.length() > 0) sb.append(" · ");
+            sb.append("未拦截");
+            return sb.toString();
         }
         if (sb.length() > 0) sb.append(" · ");
-        sb.append(r.cost).append("ms");
-        sb.append(" · ").append(size(r.size));
+
+        if (r.note != null && r.note.length() > 0) {
+            sb.append(r.note);
+        } else {
+            sb.append(r.cost).append("ms").append(" · ").append(size(r.size));
+        }
         return sb.toString();
     }
 
@@ -165,9 +206,8 @@ public class PanelAdapter extends BaseAdapter {
         return String.format(java.util.Locale.US, "%.1fMB", b / 1048576f);
     }
 
-    private TextView text(String s, float sp, int color, boolean mono) {
+    private TextView text(float sp, int color, boolean mono) {
         TextView t = new TextView(ctx);
-        t.setText(s == null ? "" : s);
         t.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp);
         t.setTextColor(color);
         if (mono) t.setTypeface(Typeface.MONOSPACE);

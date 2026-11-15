@@ -4,6 +4,9 @@ import android.webkit.CookieManager;
 import android.webkit.WebResourceResponse;
 
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.Charset;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -17,23 +20,52 @@ import okhttp3.OkHttpClient;
 import okhttp3.Protocol;
 import okhttp3.Request;
 import okhttp3.Response;
+import okhttp3.ResponseBody;
 
 /**
  * 把 WebView 的请求在原生层重发一次：
- * 拿到状态码、完整响应头（含 Set-Cookie）、真实协议版本、重定向链，
+ * 拿到状态码、完整响应头（含 Set-Cookie）、真实协议版本，
  * 再把内容和头一起喂回给 WebView。
  */
 public class Replay {
 
     private static final int MAX_HOPS = 6;
-    private static final int MAX_BODY = 6 * 1024 * 1024;
+    private static final int MAX_BODY = 4 * 1024 * 1024;
     private static final int PREVIEW = 6000;
+    private static final int SNIFF_BYTES = 8192;
 
-    private static volatile OkHttpClient CLIENT_AUTO;
-    private static volatile OkHttpClient CLIENT_H1;
-    private static volatile OkHttpClient CLIENT_H2;
+    private static final Map<String, String> BY_EXT = new HashMap<String, String>();
 
-    private static OkHttpClient client(int choice) {
+    static {
+        BY_EXT.put("html", "text/html");
+        BY_EXT.put("htm", "text/html");
+        BY_EXT.put("js", "application/javascript");
+        BY_EXT.put("mjs", "application/javascript");
+        BY_EXT.put("css", "text/css");
+        BY_EXT.put("json", "application/json");
+        BY_EXT.put("xml", "text/xml");
+        BY_EXT.put("txt", "text/plain");
+        BY_EXT.put("svg", "image/svg+xml");
+        BY_EXT.put("png", "image/png");
+        BY_EXT.put("jpg", "image/jpeg");
+        BY_EXT.put("jpeg", "image/jpeg");
+        BY_EXT.put("gif", "image/gif");
+        BY_EXT.put("webp", "image/webp");
+        BY_EXT.put("ico", "image/x-icon");
+        BY_EXT.put("woff", "font/woff");
+        BY_EXT.put("woff2", "font/woff2");
+        BY_EXT.put("ttf", "font/ttf");
+        BY_EXT.put("wasm", "application/wasm");
+        BY_EXT.put("mp4", "video/mp4");
+        BY_EXT.put("webm", "video/webm");
+        BY_EXT.put("mp3", "audio/mpeg");
+    }
+
+    private static OkHttpClient CLIENT_AUTO;
+    private static OkHttpClient CLIENT_H1;
+    private static OkHttpClient CLIENT_H2;
+
+    private static synchronized OkHttpClient client(int choice) {
         if (choice == Net.PROTO_H1) {
             if (CLIENT_H1 == null) CLIENT_H1 = build(Arrays.asList(Protocol.HTTP_1_1));
             return CLIENT_H1;
@@ -83,7 +115,6 @@ public class Replay {
 
         OkHttpClient client = client(protoChoice);
         StringBuilder chain = new StringBuilder();
-        String extraCookie = null;
 
         try {
             for (int hop = 0; hop <= MAX_HOPS; hop++) {
@@ -97,51 +128,75 @@ public class Replay {
                         } catch (Throwable ignored) { }
                     }
                 }
-                if (extraCookie != null && extraCookie.length() > 0) {
-                    rb.header("Cookie", extraCookie);
-                }
+                // WebResourceRequest 的请求头默认不含 Cookie，必须自己从 CookieManager 取；
+                // 每一跳都重新取一次，跳转后域名/路径变了也能拿到正确的那份。
+                String ck = cookieFor(current.toString());
+                if (ck != null && ck.length() > 0) rb.header("Cookie", ck);
 
                 Response resp = client.newCall(rb.build()).execute();
                 try {
                     int code = resp.code();
+                    String ct = resp.header("Content-Type");
                     rec.status = code;
                     rec.protocol = protoName(resp.protocol());
-                    rec.mime = mimeOf(resp.header("Content-Type"));
                     rec.responseHeaders = dumpResp(resp.headers());
 
                     String loc = resp.header("Location");
-                    if (loc != null && code >= 300 && code < 400 && hop < MAX_HOPS) {
+
+                    // 子资源手动跟随，便于把链记全
+                    if (!mainFrame && loc != null && code >= 300 && code < 400 && hop < MAX_HOPS) {
                         chain.append(code).append(' ').append(current.toString()).append('\n');
                         chain.append("   -> ").append(loc).append('\n');
-                        List<String> sc = resp.headers("Set-Cookie");
-                        pushCookies(current.toString(), sc);
-                        String pairs = cookiePairs(sc);
-                        if (pairs != null) extraCookie = mergeCookies(extraCookie, pairs);
+                        pushCookies(current.toString(), resp.headers("Set-Cookie"));
                         HttpUrl next = current.resolve(loc);
                         if (next == null) break;
                         current = next;
                         continue;
                     }
 
-                    byte[] data = new byte[0];
-                    if (resp.body() != null) {
-                        data = resp.body().bytes();
-                        if (data.length > MAX_BODY) {
-                            byte[] cut = new byte[MAX_BODY];
-                            System.arraycopy(data, 0, cut, 0, MAX_BODY);
-                            data = cut;
-                        }
+                    // 主文档的 3xx 原样交回 WebView，让 Chromium 自己跳。
+                    // 我们替它跳的话，文档 URL 会停在旧地址，页面里的相对路径全部解析错。
+                    if (mainFrame && loc != null && code >= 300 && code < 400) {
+                        rec.note = code + " → 交回 WebView 继续跳转";
+                    }
+
+                    ResponseBody body = resp.body();
+                    long declared = body == null ? -1 : body.contentLength();
+
+                    if (isStream(ct) || declared > MAX_BODY) {
+                        rec.note = isStream(ct)
+                                ? "流媒体，跳过重放"
+                                : "超过 " + (MAX_BODY / 1024 / 1024) + "MB，跳过重放";
+                        rec.responseHeaders = rec.responseHeaders
+                                + "\n\n(" + rec.note + "，已交由 WebView 直接加载，该请求会再发一次)";
+                        rec.finalUrl = current.toString();
+                        rec.cost = System.currentTimeMillis() - t0;
+                        store.addRecord(rec);
+                        return null;
+                    }
+
+                    byte[] data = readCapped(body);
+                    if (data == null) {
+                        rec.note = "超过 " + (MAX_BODY / 1024 / 1024) + "MB，跳过重放";
+                        rec.responseHeaders = rec.responseHeaders
+                                + "\n\n(" + rec.note + "，已交由 WebView 直接加载，该请求会再发一次)";
+                        rec.finalUrl = current.toString();
+                        rec.cost = System.currentTimeMillis() - t0;
+                        store.addRecord(rec);
+                        return null;
                     }
 
                     rec.size = data.length;
                     rec.cost = System.currentTimeMillis() - t0;
-                    rec.bodyPreview = preview(data, resp.header("Content-Type"));
+                    rec.mime = mimeOf(ct, current.toString(), data);
+                    rec.finalUrl = current.toString();
+                    rec.bodyPreview = preview(data, ct, rec.mime);
                     rec.chain = chain.toString();
                     pushCookies(current.toString(), resp.headers("Set-Cookie"));
                     store.addRecord(rec);
 
                     return new WebResourceResponse(rec.mime,
-                            charsetOf(resp.header("Content-Type")),
+                            detectCharset(ct, data, rec.mime),
                             code, reason(code), clean(resp.headers()),
                             new ByteArrayInputStream(data));
                 } finally {
@@ -160,6 +215,16 @@ public class Replay {
         return null;
     }
 
+    private static String cookieFor(String url) {
+        try {
+            CookieManager cm = CookieManager.getInstance();
+            cm.setAcceptCookie(true);
+            return cm.getCookie(url);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
     /**
      * 这几类头必须丢掉：Host/Connection 由客户端自己生成；
      * Accept-Encoding 交给 OkHttp 自动协商并解压；
@@ -171,7 +236,8 @@ public class Replay {
                 || l.equals("content-type") || l.equals("accept-encoding")
                 || l.equals("transfer-encoding") || l.equals("upgrade")
                 || l.equals("proxy-connection") || l.equals("if-none-match")
-                || l.equals("if-modified-since") || l.equals("if-range");
+                || l.equals("if-modified-since") || l.equals("if-range")
+                || l.equals("cookie");
     }
 
     private static String dumpResp(Headers h) {
@@ -181,6 +247,26 @@ public class Replay {
             sb.append(h.name(i)).append(": ").append(h.value(i)).append('\n');
         }
         return sb.toString().trim();
+    }
+
+    private static byte[] readCapped(ResponseBody body) throws IOException {
+        if (body == null) return new byte[0];
+        InputStream in = body.byteStream();
+        ByteArrayOutputStream bo = new ByteArrayOutputStream();
+        byte[] buf = new byte[16384];
+        int n;
+        while ((n = in.read(buf)) > 0) {
+            if (bo.size() + n > MAX_BODY) return null;
+            bo.write(buf, 0, n);
+        }
+        return bo.toByteArray();
+    }
+
+    private static boolean isStream(String ct) {
+        if (ct == null) return false;
+        String m = ct.toLowerCase();
+        return m.startsWith("video/") || m.startsWith("audio/")
+                || m.contains("event-stream") || m.contains("x-mixed-replace");
     }
 
     /** 回给 WebView 的头：去掉已失效的压缩与长度信息，避免长度不符导致渲染失败 */
@@ -211,23 +297,6 @@ public class Replay {
         } catch (Throwable ignored) { }
     }
 
-    private static String cookiePairs(List<String> setCookies) {
-        if (setCookies == null || setCookies.isEmpty()) return null;
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < setCookies.size(); i++) {
-            String s = setCookies.get(i);
-            if (s == null) continue;
-            int cut = s.indexOf(';');
-            sb.append(cut > 0 ? s.substring(0, cut) : s).append("; ");
-        }
-        return sb.length() == 0 ? null : sb.toString();
-    }
-
-    private static String mergeCookies(String old, String add) {
-        if (old == null || old.length() == 0) return add;
-        return old + add;
-    }
-
     private static String protoName(Protocol p) {
         if (p == null) return "";
         if (p == Protocol.HTTP_2) return "HTTP/2";
@@ -236,21 +305,59 @@ public class Replay {
         return p.toString().toUpperCase();
     }
 
-    private static String preview(byte[] data, String ct) {
-        String m = ct == null ? "" : ct.toLowerCase();
-        boolean text = m.contains("text/") || m.contains("json") || m.contains("xml")
-                || m.contains("javascript") || m.contains("urlencoded");
-        if (!text) return "(二进制内容，" + data.length + " 字节)";
+    /**
+     * 缺 Content-Type 时不能一律给 octet-stream，否则 HTML 会被当成二进制，
+     * 页面静默白屏。先按扩展名，再嗅探内容。
+     */
+    private static String mimeOf(String ct, String url, byte[] data) {
+        if (ct != null) {
+            int i = ct.indexOf(';');
+            String m = (i > 0 ? ct.substring(0, i) : ct).trim();
+            if (m.length() > 0) return m;
+        }
+        String ext = extOf(url);
+        if (ext != null) {
+            String m = BY_EXT.get(ext);
+            if (m != null) return m;
+        }
+        if (looksHtml(data)) return "text/html";
+        return "application/octet-stream";
+    }
+
+    private static String extOf(String url) {
         try {
-            String s = new String(data, Charset.forName(charsetOf(ct)));
-            if (s.length() > PREVIEW) s = s.substring(0, PREVIEW) + "\n…（已截断）";
-            return s;
+            String p = HttpUrl.parse(url).encodedPath();
+            int dot = p.lastIndexOf('.');
+            int slash = p.lastIndexOf('/');
+            if (dot < 0 || dot < slash) return null;
+            String e = p.substring(dot + 1).toLowerCase();
+            return e.length() > 6 ? null : e;
         } catch (Throwable t) {
-            return "(解码失败)";
+            return null;
         }
     }
 
-    private static String charsetOf(String ct) {
+    private static boolean looksHtml(byte[] data) {
+        try {
+            int start = 0;
+            if (data.length > 3 && (data[0] & 0xFF) == 0xEF && (data[1] & 0xFF) == 0xBB
+                    && (data[2] & 0xFF) == 0xBF) start = 3;
+            int n = Math.min(data.length, 512);
+            String s = new String(data, start, n - start, Charset.forName("ISO-8859-1"))
+                    .trim().toLowerCase();
+            return s.startsWith("<!doctype html") || s.startsWith("<html")
+                    || s.startsWith("<!--") || s.startsWith("<head")
+                    || s.startsWith("<body") || s.startsWith("<?xml");
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /**
+     * 响应头没写 charset 时，先看 <meta charset>，再判断是不是合法 UTF-8，
+     * 都不是就按 GBK 兜底（国内老站绝大多数是 GBK/GB2312）。
+     */
+    private static String detectCharset(String ct, byte[] data, String mime) {
         if (ct != null) {
             int i = ct.toLowerCase().indexOf("charset=");
             if (i >= 0) {
@@ -261,14 +368,67 @@ public class Replay {
                 if (c.length() > 0) return c;
             }
         }
-        return "utf-8";
+        if (!isText(mime)) return "utf-8";
+        String meta = sniffMetaCharset(data);
+        if (meta != null) return meta;
+        if (looksUtf8(data)) return "utf-8";
+        return "GBK";
     }
 
-    private static String mimeOf(String ct) {
-        if (ct == null) return "application/octet-stream";
-        int i = ct.indexOf(';');
-        String m = (i > 0 ? ct.substring(0, i) : ct).trim();
-        return m.length() == 0 ? "application/octet-stream" : m;
+    private static boolean isText(String mime) {
+        if (mime == null) return false;
+        String m = mime.toLowerCase();
+        return m.startsWith("text/") || m.contains("json") || m.contains("xml")
+                || m.contains("javascript") || m.contains("urlencoded");
+    }
+
+    private static String sniffMetaCharset(byte[] data) {
+        try {
+            int n = Math.min(data.length, 4096);
+            String s = new String(data, 0, n, Charset.forName("ISO-8859-1")).toLowerCase();
+            int i = s.indexOf("charset=");
+            if (i < 0) return null;
+            int start = i + 8;
+            while (start < s.length() && (s.charAt(start) == '"' || s.charAt(start) == '\'')) start++;
+            int end = start;
+            while (end < s.length() && end - start < 24) {
+                char c = s.charAt(end);
+                if (Character.isLetterOrDigit(c) || c == '-' || c == '_') end++;
+                else break;
+            }
+            if (end == start) return null;
+            String cs = s.substring(start, end);
+            Charset.forName(cs);
+            return cs;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private static boolean looksUtf8(byte[] data) {
+        try {
+            int n = Math.min(data.length, SNIFF_BYTES);
+            String s = new String(data, 0, n, Charset.forName("UTF-8"));
+            int bad = 0;
+            for (int i = 0; i < s.length(); i++) {
+                if (s.charAt(i) == '\uFFFD') bad++;
+            }
+            // 截断在多字节字符中间也会产生个别坏字符，允许 0.5% 以内的噪声
+            return s.length() == 0 || bad * 200 < s.length();
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private static String preview(byte[] data, String ct, String mime) {
+        if (!isText(mime)) return "(二进制内容，" + data.length + " 字节)";
+        try {
+            String s = new String(data, Charset.forName(detectCharset(ct, data, mime)));
+            if (s.length() > PREVIEW) s = s.substring(0, PREVIEW) + "\n…（已截断）";
+            return s;
+        } catch (Throwable t) {
+            return "(解码失败)";
+        }
     }
 
     private static String reason(int code) {
