@@ -9,8 +9,10 @@ import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
 import android.os.Bundle;
+import android.text.Editable;
 import android.text.InputType;
 import android.text.TextUtils;
+import android.text.TextWatcher;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.KeyEvent;
@@ -27,6 +29,7 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.AdapterView;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.ListView;
@@ -180,7 +183,7 @@ public class MainActivity extends Activity {
         urlBar.setInputType(InputType.TYPE_TEXT_VARIATION_URI);
         urlBar.setImeOptions(EditorInfo.IME_ACTION_GO);
         urlBar.setBackground(round(0xFF12141A, 8));
-        urlBar.setPadding(dp(12), 0, dp(12), 0);
+        urlBar.setPadding(dp(12), 0, dp(34), 0);
         urlBar.setOnEditorActionListener(new TextView.OnEditorActionListener() {
             public boolean onEditorAction(TextView v, int id, KeyEvent e) {
                 go(urlBar.getText().toString());
@@ -188,10 +191,42 @@ public class MainActivity extends Activity {
             }
         });
 
+        final TextView clear = new TextView(this);
+        clear.setText("✕");
+        clear.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f);
+        clear.setTextColor(C_DIM);
+        clear.setGravity(Gravity.CENTER);
+        clear.setVisibility(View.GONE);
+        clear.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) { urlBar.setText(""); }
+        });
+        urlBar.addTextChangedListener(new TextWatcher() {
+            public void beforeTextChanged(CharSequence s, int a, int b, int c) { }
+            public void onTextChanged(CharSequence s, int a, int b, int c) { }
+            public void afterTextChanged(Editable s) {
+                clear.setVisibility(s.length() > 0 ? View.VISIBLE : View.GONE);
+            }
+        });
+
+        FrameLayout urlWrap = new FrameLayout(this);
+        urlWrap.addView(urlBar, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        FrameLayout.LayoutParams clp = new FrameLayout.LayoutParams(
+                dp(26), dp(26), Gravity.END | Gravity.CENTER_VERTICAL);
+        clp.rightMargin = dp(5);
+        urlWrap.addView(clear, clp);
+
         LinearLayout.LayoutParams ulp = new LinearLayout.LayoutParams(0, dp(38), 1f);
         ulp.leftMargin = dp(3);
-        ulp.rightMargin = dp(5);
-        bar.addView(urlBar, ulp);
+        ulp.rightMargin = dp(4);
+        bar.addView(urlWrap, ulp);
+
+        TextView home = iconBtn("主页", new Runnable() {
+            public void run() { goHome(); }
+        });
+        home.setTextColor(C_DIM);
+        home.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
+        bar.addView(home);
 
         TextView g = iconBtn("GO", new Runnable() {
             public void run() { go(urlBar.getText().toString()); }
@@ -200,6 +235,11 @@ public class MainActivity extends Activity {
         g.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f);
         bar.addView(g);
         return bar;
+    }
+
+    private void goHome() {
+        urlBar.setText("");
+        web.loadDataWithBaseURL(null, HOME, "text/html", "utf-8", null);
     }
 
     private View buildModeRow() {
@@ -382,14 +422,24 @@ public class MainActivity extends Activity {
         }
 
         public void onPageStarted(WebView v, String u, Bitmap f) {
-            urlBar.setText(u);
+            setUrlText(u);
             inject();
         }
 
         public void onPageFinished(WebView v, String u) {
-            urlBar.setText(u);
+            setUrlText(u);
             inject();
         }
+    }
+
+    /** 主页是内嵌的 data 页面，显示 about:blank 没有意义，直接清空让提示语露出来 */
+    private void setUrlText(String u) {
+        if (u == null) return;
+        if (u.startsWith("about:") || u.startsWith("data:")) {
+            urlBar.setText("");
+            return;
+        }
+        urlBar.setText(u);
     }
 
     private WebResourceResponse handle(WebResourceRequest r) {
