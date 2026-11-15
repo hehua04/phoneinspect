@@ -1,6 +1,7 @@
 package com.phoneinspect;
 
 import android.app.Activity;
+import android.content.Context;
 import android.content.pm.PackageInfo;
 import android.content.res.Configuration;
 import android.graphics.Bitmap;
@@ -43,8 +44,13 @@ import org.json.JSONObject;
 import org.json.JSONTokener;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.OutputStreamWriter;
+import java.io.PrintWriter;
+import java.io.StringWriter;
+import java.util.Arrays;
+import java.util.Comparator;
 import java.util.Map;
 
 public class MainActivity extends Activity {
@@ -179,6 +185,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
+        installCrashHandler();
         // 自己就是调试工具，开着让 chrome://inspect 也能接进来做对照
         WebView.setWebContentsDebuggingEnabled(true);
 
@@ -213,6 +220,98 @@ public class MainActivity extends Activity {
         setMode(Net.MODE_INTERCEPT, false);
         setProto(Net.PROTO_AUTO, false);
         setTab(PanelAdapter.TAB_NET);
+        reportLastCrash();
+    }
+
+    // ---- 崩溃兜底 ----
+
+    /** 这个 App 本身就是调试工具，出问题不该还得找电脑看 logcat */
+    private void installCrashHandler() {
+        final Thread.UncaughtExceptionHandler prev = Thread.getDefaultUncaughtExceptionHandler();
+        final Context ctx = getApplicationContext();
+        Thread.setDefaultUncaughtExceptionHandler(new Thread.UncaughtExceptionHandler() {
+            public void uncaughtException(Thread t, Throwable e) {
+                try {
+                    saveCrash(ctx, t, e);
+                } catch (Throwable ignored) { }
+                if (prev != null) prev.uncaughtException(t, e);
+            }
+        });
+    }
+
+    private static void saveCrash(Context ctx, Thread t, Throwable e) {
+        FileOutputStream fos = null;
+        try {
+            File dir = ctx.getExternalFilesDir("crash");
+            if (dir == null) return;
+            if (!dir.exists() && !dir.mkdirs()) return;
+
+            StringWriter sw = new StringWriter();
+            PrintWriter pw = new PrintWriter(sw);
+            pw.println("time   : " + new java.util.Date());
+            pw.println("thread : " + t.getName());
+            pw.println();
+            e.printStackTrace(pw);
+            pw.flush();
+
+            File f = new File(dir, "crash-" + System.currentTimeMillis() + ".txt");
+            fos = new FileOutputStream(f);
+            fos.write(sw.toString().getBytes("UTF-8"));
+
+            File[] all = dir.listFiles();
+            if (all != null && all.length > 5) {
+                Arrays.sort(all, byTime(true));
+                for (int i = 0; i < all.length - 5; i++) all[i].delete();
+            }
+        } catch (Throwable ignored) {
+        } finally {
+            try { if (fos != null) fos.close(); } catch (Throwable ignored) { }
+        }
+    }
+
+    private void reportLastCrash() {
+        File dir = getExternalFilesDir("crash");
+        if (dir == null) return;
+        File[] all = dir.listFiles();
+        if (all == null || all.length == 0) return;
+        Arrays.sort(all, byTime(false));
+        File newest = all[0];
+        String text = readSmall(newest, 6000);
+        if (text.length() == 0) return;
+
+        // 改名，避免每次启动都重复播报同一次崩溃
+        newest.renameTo(new File(dir, newest.getName() + ".seen"));
+
+        Net.LogItem l = new Net.LogItem();
+        l.level = "error";
+        l.msg = "上次运行崩溃了（" + newest.getName() + "）\n" + text;
+        store.addLog(l);
+        Toast.makeText(this, "上次运行崩溃过，堆栈已放进「控制台」", Toast.LENGTH_LONG).show();
+    }
+
+    private static Comparator<File> byTime(final boolean asc) {
+        return new Comparator<File>() {
+            public int compare(File a, File b) {
+                long x = a.lastModified();
+                long y = b.lastModified();
+                return asc ? (x < y ? -1 : (x == y ? 0 : 1)) : (x > y ? -1 : (x == y ? 0 : 1));
+            }
+        };
+    }
+
+    private static String readSmall(File f, int max) {
+        FileInputStream in = null;
+        try {
+            in = new FileInputStream(f);
+            int len = (int) Math.min(max, f.length());
+            byte[] buf = new byte[len];
+            int n = in.read(buf);
+            return n <= 0 ? "" : new String(buf, 0, n, "UTF-8");
+        } catch (Throwable t) {
+            return "";
+        } finally {
+            try { if (in != null) in.close(); } catch (Throwable ignored) { }
+        }
     }
 
     private int panelHeight() {
@@ -719,29 +818,44 @@ public class MainActivity extends Activity {
     }
 
     private WebResourceResponse handle(WebResourceRequest r) {
-        if (mode == Net.MODE_OFF) return null;
+        // 这个方法是 WebView 在后台线程回调的，任何未捕获异常都会直接杀掉进程，
+        // 所以整段兜底：出问题就记一条然后交回 WebView，绝不让 App 闪退。
+        try {
+            if (mode == Net.MODE_OFF) return null;
 
-        String url = r.getUrl().toString();
-        if (url.startsWith("data:") || url.startsWith("blob:")
-                || url.startsWith("about:") || url.startsWith("javascript:")) {
+            String url = r.getUrl() == null ? "" : r.getUrl().toString();
+            if (url.length() == 0
+                    || url.startsWith("data:") || url.startsWith("blob:")
+                    || url.startsWith("about:") || url.startsWith("javascript:")) {
+                return null;
+            }
+
+            String method = r.getMethod() == null ? "GET" : r.getMethod();
+            Map<String, String> h = r.getRequestHeaders();
+
+            if (mode == Net.MODE_RECORD || !"GET".equalsIgnoreCase(method)) {
+                Net.Record rec = new Net.Record();
+                rec.method = method;
+                rec.url = url;
+                rec.mainFrame = r.isForMainFrame();
+                rec.requestHeaders = Replay.dump(h);
+                rec.responseHeaders = "(未拦截，无响应信息)";
+                store.addRecord(rec);
+                return null;
+            }
+
+            return Replay.fetch(url, h, r.isForMainFrame(), store, proto);
+
+        } catch (Throwable t) {
+            try {
+                Net.Record rec = new Net.Record();
+                rec.method = "?";
+                rec.url = String.valueOf(r.getUrl());
+                rec.responseHeaders = "拦截层异常，已回退到 WebView 原生请求：\n" + t;
+                store.addRecord(rec);
+            } catch (Throwable ignored) { }
             return null;
         }
-
-        String method = r.getMethod();
-        Map<String, String> h = r.getRequestHeaders();
-
-        if (mode == Net.MODE_RECORD || !"GET".equalsIgnoreCase(method)) {
-            Net.Record rec = new Net.Record();
-            rec.method = method;
-            rec.url = url;
-            rec.mainFrame = r.isForMainFrame();
-            rec.requestHeaders = Replay.dump(h);
-            rec.responseHeaders = "(未拦截，无响应信息)";
-            store.addRecord(rec);
-            return null;
-        }
-
-        return Replay.fetch(url, h, r.isForMainFrame(), store, proto);
     }
 
     public class Bridge {
@@ -835,7 +949,7 @@ public class MainActivity extends Activity {
             String[] hint = {
                     "自动协商：h2 优先，服务端不支持则回落 h1",
                     "强制 HTTP/1.1",
-                    "只接受 HTTP/2，服务端不支持会直接失败"
+                    "探测 HTTP/2：没协商到 h2 就标记失败并交回 WebView"
             };
             Toast.makeText(this, hint[p], Toast.LENGTH_SHORT).show();
             reloadIfLoaded();
@@ -1064,7 +1178,7 @@ public class MainActivity extends Activity {
         sb.append("模式  ").append(mode == Net.MODE_INTERCEPT ? "拦截 GET"
                 : mode == Net.MODE_RECORD ? "仅记录" : "关闭").append('\n');
         sb.append("协议  ").append(proto == Net.PROTO_H1 ? "仅 HTTP/1.1"
-                : proto == Net.PROTO_H2 ? "仅 HTTP/2" : "自动（h2 优先）").append('\n');
+                : proto == Net.PROTO_H2 ? "探测 HTTP/2" : "自动（h2 优先）").append('\n');
         sb.append("记录  ").append(store.recordCount()).append(" 条请求 / ")
                 .append(store.logCount()).append(" 条日志\n\n");
         sb.append("说明\n");

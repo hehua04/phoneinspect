@@ -67,7 +67,6 @@ public class Replay {
         BY_EXT.put("mp3", "audio/mpeg");
     }
 
-    private static OkHttpClient CLIENT_AUTO;
     private static OkHttpClient CLIENT_H1;
     private static OkHttpClient CLIENT_H2;
 
@@ -76,14 +75,13 @@ public class Replay {
             if (CLIENT_H1 == null) CLIENT_H1 = build(Arrays.asList(Protocol.HTTP_1_1));
             return CLIENT_H1;
         }
-        if (choice == Net.PROTO_H2) {
-            if (CLIENT_H2 == null) CLIENT_H2 = build(Arrays.asList(Protocol.HTTP_2));
-            return CLIENT_H2;
+        // OkHttp 3.x 的 protocols() 强制要求列表里有 http/1.1 或 h2_prior_knowledge，
+        // 单独传 [HTTP_2] 会抛 IllegalArgumentException。
+        // 所以「探测 H2」不能靠限制协议，只能在拿到响应后检查协商结果（见 fetch 里的 PROTO_H2 分支）。
+        if (CLIENT_H2 == null) {
+            CLIENT_H2 = build(Arrays.asList(Protocol.HTTP_1_1, Protocol.HTTP_2));
         }
-        if (CLIENT_AUTO == null) {
-            CLIENT_AUTO = build(Arrays.asList(Protocol.HTTP_2, Protocol.HTTP_1_1));
-        }
-        return CLIENT_AUTO;
+        return CLIENT_H2;
     }
 
     private static OkHttpClient build(List<Protocol> ps) {
@@ -118,11 +116,13 @@ public class Replay {
         rec.mainFrame = mainFrame;
         rec.requestHeaders = dump(reqHeaders);
         long t0 = System.currentTimeMillis();
-
-        OkHttpClient client = client(protoChoice);
         StringBuilder chain = new StringBuilder();
 
         try {
+            // 必须放在 try 里：协议配置非法时 client() 会抛异常，
+            // 一旦漏到 shouldInterceptRequest 外面就是未捕获异常，整个进程会被杀掉。
+            OkHttpClient client = client(protoChoice);
+
             for (int hop = 0; hop <= MAX_HOPS; hop++) {
                 Request.Builder rb = new Request.Builder().url(current).get();
                 if (reqHeaders != null) {
@@ -145,6 +145,16 @@ public class Replay {
                     String ct = resp.header("Content-Type");
                     rec.status = code;
                     rec.protocol = protoName(resp.protocol());
+
+                    // 「探测 H2」：协议列表里必须留着 h1，所以只能在协商结果上判断。
+                    // 不是 h2 就记一笔交回 WebView，等效于告诉用户这站没开 h2。
+                    if (protoChoice == Net.PROTO_H2 && resp.protocol() != Protocol.HTTP_2) {
+                        rec.note = "服务端没协商到 HTTP/2（实际 " + rec.protocol + "）";
+                        rec.finalUrl = current.toString();
+                        rec.cost = System.currentTimeMillis() - t0;
+                        store.addRecord(rec);
+                        return null;
+                    }
                     rec.responseHeaders = dumpResp(resp.headers());
 
                     String loc = resp.header("Location");

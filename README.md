@@ -51,6 +51,17 @@ PhoneInspect 把拦截搬到 WebView 的原生层，用 `HttpURLConnection` 把�
 
 **控制台** —— 底部输入框在页面上下文执行 JS，结果显示为紫色 `[eval]` 日志。用 `eval` 而不是函数包裹，`return` 和局部变量声明都是正常语义。
 
+## 崩溃日志
+
+App 会接管未捕获异常，把堆栈写到 `Android/data/com.phoneinspect/files/crash/`（保留最近 5 份），下次启动时自动出现在「控制台」里，不需要连电脑。
+
+要看实时日志还是得用 adb：
+
+```bash
+adb logcat -b crash -d          # 只看崩溃缓冲区
+adb logcat AndroidRuntime:E *:S # 只看异常
+```
+
 ## 安装
 
 下载仓库里的 `PhoneInspect.apk`，传到手机点击安装（需允许未知来源）；或
