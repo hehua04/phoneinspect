@@ -90,7 +90,7 @@ WebView 拿到"看起来像正常响应"的内容并渲染
 - 重发时**丢掉** `If-None-Match` / `If-Modified-Since`，否则服务端返回 304 空包，页面直接白屏
 - 回给 WebView 的头**必须删掉** `Content-Length` / `Content-Encoding` / `Transfer-Encoding`，因为 body 已被解压，长度和原头对不上会导致渲染失败
 - `Set-Cookie` 不能靠响应头传给 WebView，要逐条写进 `CookieManager` 再 `flush()`
-- **主文档的 3xx 不能替 WebView 跟随**。文档 URL 是 Chromium 按它请求的 URL 定的，替它跳完它还以为在原地，页面里所有相对路径都会解析错。子资源可以跟随，主文档必须原样交回
+- **主文档的 3xx 只能记不能拦**。`WebResourceResponse` 的构造器硬性禁止 300–399，会直接抛 `IllegalArgumentException: statusCode can't be in the [300, 399] range`。所以主文档遇到 3xx 只能记下真实状态码和响应头，然后 `return null` 交给 WebView 自己重新请求并跟随跳转。代价是这次重放白发一遍，好处是文档 URL 由 Chromium 维护，页面里的相对路径不会解析错。子资源的 3xx 仍由工具手动跟随，能记全链路
 - **缺 `Content-Type` 不能给 `octet-stream`**。HTML 会被当成二进制，页面静默白屏且不报错。要按扩展名兜底再嗅探内容
 - **响应头没 charset 时不能硬编码 utf-8**。国内老站大量是 GBK，得先看 `<meta charset>`，再判断是否合法 UTF-8，都不是才回落 GBK
 - **响应体不能先全读再截断**。`body().bytes()` 会把整个视频流读进内存，得边读边计数、超限立即中断返回 `null`
@@ -102,6 +102,7 @@ WebView 拿到"看起来像正常响应"的内容并渲染
 - **协议只管被拦截的请求**。POST、WebSocket、Service Worker 不走这里，仍然由 WebView 自己决定协议。
 - **拿不到 POST 请求体**。`WebResourceRequest` 不提供 body，所以非 GET 请求只记录 URL 和请求头、不重发。
 - **超过 4MB 或流媒体不重放**。标为「跳过重放」并返回 `null` 交给 WebView，这类资源实际会下载两次。
+- **主文档的 3xx 不做重放**。能看到状态码和响应头，但响应体由 WebView 重新请求获取，这类跳转实际会发两次请求。
 - **iframe 里的 console 收不到**。`evaluateJavascript` 只作用于主 frame，跨域 iframe 的日志拿不到。
 - **JS 桥 `PI` 对所有页面开放**。恶意页面理论上能刷日志（有 500 条上限，风险很低）。只在调试自己的站点时用。
 - **导出写文件不写剪贴板**。记录含 `Set-Cookie`，剪贴板对其它 App 可读。文件落在 `Android/data/com.phoneinspect/files/export/`。

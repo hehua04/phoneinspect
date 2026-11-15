@@ -42,7 +42,16 @@ VC="$(grep -E '^versionCode=' "$VFILE" | head -1 | cut -d= -f2 | tr -d ' \r')"
 VN="$(grep -E '^versionName=' "$VFILE" | head -1 | cut -d= -f2 | tr -d ' \r')"
 if [ -z "$VC" ] || [ -z "$VN" ]; then echo "!! version.properties 格式不对"; exit 1; fi
 echo "    版本：$VN ($VC)"
-rm -rf "$OUT"
+
+rm -rf "$OUT" 2>/dev/null || true
+if [ -e "$OUT/base.apk" ] || [ -e "$OUT/classes.jar" ]; then
+  rm -rf "$OUT" 2>/dev/null || true
+fi
+if [ -e "$OUT/base.apk" ]; then
+  echo "!! build/ 清理失败，可能被杀毒或安全删除工具占用"
+  echo "   请手动删除后重试：$OUT"
+  exit 1
+fi
 mkdir -p "$OUT/dex"
 
 echo "==> 1/6 编译资源"
@@ -55,14 +64,18 @@ echo "==> 2/6 链接资源与清单"
 
 echo "==> 3/6 编译 Java"
 mkdir -p "$OUT/classes"
-find "$APP/java" -name "*.java" > "$OUT/sources.txt"
+# 文件名带 PID，避免复用固定名字时被安全工具/杀毒占住导致写入失败 ——
+# 那样 javac 会拿上一次的旧清单继续编，看着构建成功其实用的是旧产物。
+SRCLIST="$OUT/sources-$$.txt"
+JLOG="$OUT/javac-$$.log"
+find "$APP/java" -name "*.java" > "$SRCLIST"
 if [ "$EXE" = ".exe" ]; then SEP=";"; else SEP=":"; fi
 CP="$AJAR"
 for j in $JARS; do CP="$CP$SEP$j"; done
 javac -encoding UTF-8 -source 8 -target 8 -nowarn \
-  -classpath "$CP" -d "$OUT/classes" @"$OUT/sources.txt" > "$OUT/javac.log" 2>&1
+  -classpath "$CP" -d "$OUT/classes" @"$SRCLIST" > "$JLOG" 2>&1
 if [ $? -ne 0 ] || [ ! -f "$OUT/classes/com/phoneinspect/MainActivity.class" ]; then
-  echo "!! javac 失败："; cat "$OUT/javac.log"; exit 1
+  echo "!! javac 失败："; cat "$JLOG"; exit 1
 fi
 
 echo "==> 4/6 转 dex"

@@ -36,6 +36,12 @@ public class Replay {
 
     private static final Map<String, String> BY_EXT = new HashMap<String, String>();
 
+    private static final String[] HTML_TAGS = {
+            "html", "head", "body", "div", "span", "p", "h1", "h2", "h3", "h4",
+            "title", "meta", "script", "link", "style", "table", "ul", "ol", "li",
+            "form", "input", "img", "a", "br", "nav", "section", "article", "pre", "label"
+    };
+
     static {
         BY_EXT.put("html", "text/html");
         BY_EXT.put("htm", "text/html");
@@ -154,10 +160,16 @@ public class Replay {
                         continue;
                     }
 
-                    // 主文档的 3xx 原样交回 WebView，让 Chromium 自己跳。
-                    // 我们替它跳的话，文档 URL 会停在旧地址，页面里的相对路径全部解析错。
+                    // WebResourceResponse 的构造器直接禁止 300-399，抛 IllegalArgumentException。
+                    // 所以主文档的 3xx 无法"透传"，只能记一笔真实状态再返回 null，
+                    // 让 WebView 自己重新请求并跟随跳转 —— 文档 URL 由 Chromium 维护，
+                    // 相对路径才不会解析错。
                     if (mainFrame && loc != null && code >= 300 && code < 400) {
-                        rec.note = code + " → 交回 WebView 继续跳转";
+                        rec.note = code + " → 交回 WebView 自行跳转";
+                        rec.finalUrl = current.toString();
+                        rec.cost = System.currentTimeMillis() - t0;
+                        store.addRecord(rec);
+                        return null;
                     }
 
                     ResponseBody body = resp.body();
@@ -193,12 +205,15 @@ public class Replay {
                     rec.bodyPreview = preview(data, ct, rec.mime);
                     rec.chain = chain.toString();
                     pushCookies(current.toString(), resp.headers("Set-Cookie"));
-                    store.addRecord(rec);
 
-                    return new WebResourceResponse(rec.mime,
+                    // 先构造再落库：构造器可能对状态码/参数抛异常，
+                    // 先 add 会导致同一条记录被 catch 分支再加一遍。
+                    WebResourceResponse out = new WebResourceResponse(rec.mime,
                             detectCharset(ct, data, rec.mime),
                             code, reason(code), clean(resp.headers()),
                             new ByteArrayInputStream(data));
+                    store.addRecord(rec);
+                    return out;
                 } finally {
                     resp.close();
                 }
@@ -342,15 +357,37 @@ public class Replay {
             int start = 0;
             if (data.length > 3 && (data[0] & 0xFF) == 0xEF && (data[1] & 0xFF) == 0xBB
                     && (data[2] & 0xFF) == 0xBF) start = 3;
-            int n = Math.min(data.length, 512);
-            String s = new String(data, start, n - start, Charset.forName("ISO-8859-1"))
+            int n = Math.min(data.length - start, 512);
+            if (n <= 0) return false;
+            String s = new String(data, start, n, Charset.forName("ISO-8859-1"))
                     .trim().toLowerCase();
-            return s.startsWith("<!doctype html") || s.startsWith("<html")
-                    || s.startsWith("<!--") || s.startsWith("<head")
-                    || s.startsWith("<body") || s.startsWith("<?xml");
+
+            if (s.startsWith("<!doctype") || s.startsWith("<!--")
+                    || s.startsWith("<?xml")) return true;
+
+            // 片段式文档不一定以 doctype/html 开头，前 512 字节里出现任意常见标签就认作 HTML
+            for (int t = 0; t < HTML_TAGS.length; t++) {
+                if (hasTag(s, HTML_TAGS[t])) return true;
+            }
+            return false;
         } catch (Throwable t) {
             return false;
         }
+    }
+
+    private static boolean hasTag(String s, String tag) {
+        String needle = "<" + tag;
+        int i = s.indexOf(needle);
+        while (i >= 0) {
+            int after = i + needle.length();
+            if (after >= s.length()) return false;
+            char c = s.charAt(after);
+            if (c == '>' || c == '/' || c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+                return true;
+            }
+            i = s.indexOf(needle, i + 1);
+        }
+        return false;
     }
 
     /**
