@@ -20,6 +20,16 @@ esac
 
 if [ -n "$(command -v python3)" ]; then PY="python3"; else PY="python"; fi
 
+LIBDIR="$ROOT/libs"
+JARS=""
+for j in "$LIBDIR"/*.jar; do
+  [ -f "$j" ] && JARS="$JARS $j"
+done
+if [ -z "$JARS" ]; then
+  echo "!! libs/ 下没有 jar，请先放入 okhttp 与 okio"; exit 1
+fi
+echo "==> 依赖：$JARS"
+
 if [ ! -f "$AJAR" ] || [ ! -d "$BT" ]; then
   echo "==> SDK 组件缺失，调用 bootstrap.sh"
   bash "$ROOT/bootstrap.sh" || exit 1
@@ -39,8 +49,11 @@ echo "==> 2/6 链接资源与清单"
 echo "==> 3/6 编译 Java"
 mkdir -p "$OUT/classes"
 find "$APP/java" -name "*.java" > "$OUT/sources.txt"
+if [ "$EXE" = ".exe" ]; then SEP=";"; else SEP=":"; fi
+CP="$AJAR"
+for j in $JARS; do CP="$CP$SEP$j"; done
 javac -encoding UTF-8 -source 8 -target 8 -nowarn \
-  -classpath "$AJAR" -d "$OUT/classes" @"$OUT/sources.txt" > "$OUT/javac.log" 2>&1
+  -classpath "$CP" -d "$OUT/classes" @"$OUT/sources.txt" > "$OUT/javac.log" 2>&1
 if [ $? -ne 0 ] || [ ! -f "$OUT/classes/com/phoneinspect/MainActivity.class" ]; then
   echo "!! javac 失败："; cat "$OUT/javac.log"; exit 1
 fi
@@ -49,7 +62,7 @@ echo "==> 4/6 转 dex"
 cd "$OUT/classes" && jar cf "$OUT/classes.jar" . || exit 1
 cd "$OUT"
 java -cp "$BT/lib/d8.jar" com.android.tools.r8.D8 \
-  --lib "$AJAR" --min-api 26 --output "$OUT/dex" "$OUT/classes.jar" || exit 1
+  --lib "$AJAR" --min-api 26 --output "$OUT/dex" "$OUT/classes.jar" $JARS || exit 1
 
 echo "==> 5/6 合并 dex 并对齐"
 "$PY" - "$OUT" <<'PY'

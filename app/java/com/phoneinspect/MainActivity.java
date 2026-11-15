@@ -24,6 +24,7 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.AdapterView;
 import android.widget.EditText;
+import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.ListView;
 import android.widget.TextView;
@@ -83,10 +84,12 @@ public class MainActivity extends Activity {
     private ListView list;
     private TextView tabNet, tabLog, tabInfo;
     private TextView[] modeChip;
+    private TextView[] protoChip;
     private PanelAdapter adapter;
 
     private final Net.Store store = Net.Store.get();
     private int mode = Net.MODE_INTERCEPT;
+    private int proto = Net.PROTO_AUTO;
     private int tab = PanelAdapter.TAB_NET;
 
     @Override
@@ -125,6 +128,7 @@ public class MainActivity extends Activity {
 
         CookieManager.getInstance().setAcceptCookie(true);
         setMode(Net.MODE_INTERCEPT, false);
+        setProto(Net.PROTO_AUTO, false);
         setTab(PanelAdapter.TAB_NET);
     }
 
@@ -181,30 +185,48 @@ public class MainActivity extends Activity {
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
         row.setBackgroundColor(C_SURF);
-        row.setPadding(dp(8), 0, dp(8), dp(6));
+        row.setPadding(dp(8), 0, dp(4), dp(6));
+
+        HorizontalScrollView hs = new HorizontalScrollView(this);
+        hs.setHorizontalScrollBarEnabled(false);
+        LinearLayout chips = new LinearLayout(this);
+        chips.setOrientation(LinearLayout.HORIZONTAL);
+        chips.setGravity(Gravity.CENTER_VERTICAL);
 
         modeChip = new TextView[3];
         String[] names = {"拦截 GET", "仅记录", "关闭"};
         for (int i = 0; i < 3; i++) {
             final int m = i;
-            TextView c = new TextView(this);
-            c.setText(names[i]);
-            c.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
-            c.setGravity(Gravity.CENTER);
-            c.setPadding(dp(11), dp(5), dp(11), dp(5));
-            c.setClickable(true);
+            TextView c = chip(names[i]);
             c.setOnClickListener(new View.OnClickListener() {
                 public void onClick(View v) { setMode(m, true); }
             });
-            LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT);
-            clp.rightMargin = dp(6);
-            row.addView(c, clp);
+            chips.addView(c, chipLp());
             modeChip[i] = c;
         }
 
-        row.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1f));
+        View sep = new View(this);
+        sep.setBackgroundColor(C_LINE);
+        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(dp(1), dp(16));
+        slp.leftMargin = dp(2);
+        slp.rightMargin = dp(9);
+        chips.addView(sep, slp);
+
+        protoChip = new TextView[3];
+        String[] pn = {"自动", "H1", "H2"};
+        for (int i = 0; i < 3; i++) {
+            final int p = i;
+            TextView c = chip(pn[i]);
+            c.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View v) { setProto(p, true); }
+            });
+            chips.addView(c, chipLp());
+            protoChip[i] = c;
+        }
+
+        hs.addView(chips);
+        row.addView(hs, new LinearLayout.LayoutParams(0,
+                LinearLayout.LayoutParams.MATCH_PARENT, 1f));
 
         TextView tg = new TextView(this);
         tg.setText("面板");
@@ -220,6 +242,24 @@ public class MainActivity extends Activity {
         });
         row.addView(tg);
         return row;
+    }
+
+    private TextView chip(String label) {
+        TextView c = new TextView(this);
+        c.setText(label);
+        c.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+        c.setGravity(Gravity.CENTER);
+        c.setPadding(dp(11), dp(5), dp(11), dp(5));
+        c.setClickable(true);
+        return c;
+    }
+
+    private LinearLayout.LayoutParams chipLp() {
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        p.rightMargin = dp(6);
+        return p;
     }
 
     private LinearLayout buildPanel() {
@@ -347,7 +387,7 @@ public class MainActivity extends Activity {
             return null;
         }
 
-        return Replay.fetch(url, h, r.isForMainFrame(), store);
+        return Replay.fetch(url, h, r.isForMainFrame(), store, proto);
     }
 
     public class Bridge {
@@ -394,6 +434,32 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void setProto(int p, boolean toast) {
+        proto = p;
+        for (int i = 0; i < 3; i++) {
+            boolean on = (i == p);
+            protoChip[i].setTextColor(on ? 0xFF0F1115 : C_DIM);
+            protoChip[i].setBackground(round(on ? 0xFF3FD07A : 0xFF232830, 6));
+        }
+        if (toast) {
+            String[] hint = {
+                    "自动协商：h2 优先，服务端不支持则回落 h1",
+                    "强制 HTTP/1.1",
+                    "只接受 HTTP/2，服务端不支持会直接失败"
+            };
+            Toast.makeText(this, hint[p], Toast.LENGTH_SHORT).show();
+            reloadIfLoaded();
+        }
+    }
+
+    /** 切协议后必须重新加载才有意义，已加载的页面不会自动换协议 */
+    private void reloadIfLoaded() {
+        if (mode != Net.MODE_INTERCEPT || web == null) return;
+        String u = web.getUrl();
+        if (u == null || u.startsWith("data:") || u.startsWith("about:")) return;
+        web.reload();
+    }
+
     private void setTab(int t) {
         tab = t;
         TextView[] tabs = {tabNet, tabLog, tabInfo};
@@ -425,6 +491,8 @@ public class MainActivity extends Activity {
                 .append(" × ").append(getResources().getDisplayMetrics().heightPixels).append('\n');
         sb.append("模式  ").append(mode == Net.MODE_INTERCEPT ? "拦截 GET"
                 : mode == Net.MODE_RECORD ? "仅记录" : "关闭").append('\n');
+        sb.append("协议  ").append(proto == Net.PROTO_H1 ? "仅 HTTP/1.1"
+                : proto == Net.PROTO_H2 ? "仅 HTTP/2" : "自动（h2 优先）").append('\n');
         sb.append("记录  ").append(store.recordCount()).append(" 条请求 / ")
                 .append(store.logCount()).append(" 条日志\n\n");
         sb.append("说明\n");
@@ -432,7 +500,7 @@ public class MainActivity extends Activity {
                 .append("Set-Cookie 和重定向链。\n");
         sb.append("· POST / PUT 不重发（拿不到请求体），只记录 URL 与请求头。\n");
         sb.append("· 页面出现异常时，切到「仅记录」或「关闭」做对比。\n");
-        sb.append("· 重放连接走 HTTP/1.1；浏览器直连多为 HTTP/2，头部大小写与部分字段会有差异。\n");
+        sb.append("· 协议可随时切换；「仅 HTTP/2」在服务端不支持时会直接失败，正好用来探测有没有开 h2。\n");
         sb.append("· 点击列表任意请求查看详情，详情内文字可长按选中。\n");
         return sb.toString();
     }

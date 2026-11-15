@@ -12,6 +12,10 @@ public class Net {
     public static final int MODE_RECORD = 1;
     public static final int MODE_OFF = 2;
 
+    public static final int PROTO_AUTO = 0;
+    public static final int PROTO_H1 = 1;
+    public static final int PROTO_H2 = 2;
+
     public static class Record {
         public String method = "";
         public String url = "";

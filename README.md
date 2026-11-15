@@ -22,6 +22,20 @@ PhoneInspect 把拦截搬到 WebView 的原生层，用 `HttpURLConnection` 把�
 
 底部面板分 **网络 / 控制台 / 信息** 三块。控制台自动注入钩子，捕获 `console.*`、未捕获异常和 Promise 拒绝。点任意请求可看分组详情，支持整份复制导出。
 
+### 协议选择
+
+模式行右侧三个绿色胶囊可以随时切换重放连接使用的协议：
+
+| 选项 | `protocols()` | 语义 |
+|---|---|---|
+| **自动**（默认） | `[HTTP_2, HTTP_1_1]` | h2 优先，服务端不支持则回落 h1，最接近浏览器 |
+| **H1** | `[HTTP_1_1]` | 真能强制降级，服务端都支持 h1 |
+| **H2** | `[HTTP_2]` | 只接受 h2。服务端不支持时握手直接失败，用来探测有没有开 h2 |
+
+其实连 `[HTTP_2]` 也不能算"强制开启"——ALPN 是双向协商，客户端只能限制自己愿意接受什么。选 H2 连不上，本身就是结论。切换后会自动重新加载当前页面，因为已加载的页面不会中途换协议。
+
+详情页展示的是 `response.protocol()` 的真实结果，不是猜的。
+
 ## 安装
 
 下载仓库里的 `PhoneInspect.apk`，传到手机点击安装（需允许未知来源）；或
@@ -51,7 +65,7 @@ WebView 请求
    ↓
 WebViewClient.shouldInterceptRequest()      ← 后台线程，可阻塞
    ↓
-Replay.fetch()  用 HttpURLConnection 重发一次
+Replay.fetch()  用 OkHttp 重发一次（协议可选）
    ↓ 逐跳处理 3xx，记录重定向链，Set-Cookie 写回 CookieManager
 WebResourceResponse(mime, enc, status, reason, headers, data)
    ↓
@@ -67,7 +81,9 @@ WebView 拿到"看起来像正常响应"的内容并渲染
 
 ## 已知限制
 
-- **只有 HTTP/1.1**。重发走 `HttpURLConnection`，Android 上它被锁死在 HTTP/1.1。浏览器直连可能是 HTTP/2，头部会全小写、没有 `Connection`、并发模型也不同（资源多的页面在拦截模式下会明显更慢）。HTTP/3 完全看不到。
+- **HTTP/2 能看，HTTP/3 不能**。协议可切（自动 / 仅 h1 / 仅 h2）。但 OkHttp 从来没正式支持 QUIC，早年那个 `okhttp-quic` 分支早已废弃，所以 HTTP/3 完全看不到，QUIC 站点会退回 h2 或 h1。要看 HTTP/3 只能换 Cronet（包体积 10MB+）。
+- **h2 只是"能连"，不是"等同浏览器"**。`shouldInterceptRequest` 是每请求一次阻塞调用，单例 OkHttpClient 的连接池能复用连接、多路复用流，但 h2 优先级、流依赖、103 Early Hints 这些调度行为拿不回来。
+- **协议只管被拦截的请求**。POST、WebSocket、Service Worker 不走这里，仍然由 WebView 自己决定协议。
 - **拿不到 POST 请求体**。`WebResourceRequest` 不提供 body，所以非 GET 请求只记录 URL 和请求头、不重发。
 - 每个 GET 多一次往返，请求多的页面会变慢。
 - 记录只存在内存里，切后台被回收就没了，最多保留 400 条。
@@ -84,6 +100,9 @@ app/
     Net.java                    数据模型与内存存储
     PanelAdapter.java           请求列表 / 日志列表
     Detail.java                 请求详情弹窗
+libs/
+  okhttp-3.14.9.jar             纯 Java 版 OkHttp（非 4.x 的 Kotlin 版）
+  okio-1.17.2.jar               OkHttp 依赖
 bootstrap.sh                    下载 SDK 组件
 build.sh                        一条命令出 APK
 ```

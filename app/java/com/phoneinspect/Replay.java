@@ -4,24 +4,61 @@ import android.webkit.CookieManager;
 import android.webkit.WebResourceResponse;
 
 import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
-import java.io.InputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
 import java.nio.charset.Charset;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
+
+import okhttp3.Headers;
+import okhttp3.HttpUrl;
+import okhttp3.OkHttpClient;
+import okhttp3.Protocol;
+import okhttp3.Request;
+import okhttp3.Response;
 
 /**
- * 把 WebView 的请求在原生层重放一次：
- * 拿到状态码、完整响应头（含 Set-Cookie）、重定向链，再把内容和头一起喂回给 WebView。
+ * 把 WebView 的请求在原生层重发一次：
+ * 拿到状态码、完整响应头（含 Set-Cookie）、真实协议版本、重定向链，
+ * 再把内容和头一起喂回给 WebView。
  */
 public class Replay {
 
     private static final int MAX_HOPS = 6;
     private static final int MAX_BODY = 6 * 1024 * 1024;
     private static final int PREVIEW = 6000;
+
+    private static volatile OkHttpClient CLIENT_AUTO;
+    private static volatile OkHttpClient CLIENT_H1;
+    private static volatile OkHttpClient CLIENT_H2;
+
+    private static OkHttpClient client(int choice) {
+        if (choice == Net.PROTO_H1) {
+            if (CLIENT_H1 == null) CLIENT_H1 = build(Arrays.asList(Protocol.HTTP_1_1));
+            return CLIENT_H1;
+        }
+        if (choice == Net.PROTO_H2) {
+            if (CLIENT_H2 == null) CLIENT_H2 = build(Arrays.asList(Protocol.HTTP_2));
+            return CLIENT_H2;
+        }
+        if (CLIENT_AUTO == null) {
+            CLIENT_AUTO = build(Arrays.asList(Protocol.HTTP_2, Protocol.HTTP_1_1));
+        }
+        return CLIENT_AUTO;
+    }
+
+    private static OkHttpClient build(List<Protocol> ps) {
+        return new OkHttpClient.Builder()
+                .protocols(ps)
+                .followRedirects(false)
+                .followSslRedirects(false)
+                .connectTimeout(15, TimeUnit.SECONDS)
+                .readTimeout(30, TimeUnit.SECONDS)
+                .writeTimeout(15, TimeUnit.SECONDS)
+                .retryOnConnectionFailure(true)
+                .build();
+    }
 
     public static String dump(Map<String, String> h) {
         if (h == null || h.isEmpty()) return "(空)";
@@ -32,27 +69,11 @@ public class Replay {
         return sb.toString().trim();
     }
 
-    public static String dumpResponse(Map<String, List<String>> h) {
-        if (h == null) return "(空)";
-        StringBuilder sb = new StringBuilder();
-        for (Map.Entry<String, List<String>> e : h.entrySet()) {
-            String k = e.getKey();
-            if (k == null) continue;
-            sb.append(k).append(": ");
-            List<String> v = e.getValue();
-            if (v != null) {
-                for (int i = 0; i < v.size(); i++) {
-                    if (i > 0) sb.append(" | ");
-                    sb.append(v.get(i));
-                }
-            }
-            sb.append('\n');
-        }
-        return sb.toString().trim();
-    }
-
     public static WebResourceResponse fetch(String url, Map<String, String> reqHeaders,
-                                            boolean mainFrame, Net.Store store) {
+                                            boolean mainFrame, Net.Store store, int protoChoice) {
+        HttpUrl current = HttpUrl.parse(url);
+        if (current == null) return null;
+
         Net.Record rec = new Net.Record();
         rec.method = "GET";
         rec.url = url;
@@ -60,46 +81,73 @@ public class Replay {
         rec.requestHeaders = dump(reqHeaders);
         long t0 = System.currentTimeMillis();
 
+        OkHttpClient client = client(protoChoice);
         StringBuilder chain = new StringBuilder();
-        String current = url;
         String extraCookie = null;
-        HttpURLConnection conn = null;
 
         try {
             for (int hop = 0; hop <= MAX_HOPS; hop++) {
-                conn = open(current, reqHeaders, extraCookie);
-
-                int code = conn.getResponseCode();
-                rec.status = code;
-                rec.protocol = protoOf(conn.getHeaderField(0));
-                Map<String, List<String>> hf = conn.getHeaderFields();
-                rec.responseHeaders = dumpResponse(hf);
-                rec.mime = mimeOf(conn.getContentType());
-
-                String loc = conn.getHeaderField("Location");
-                if (loc != null && code >= 300 && code < 400 && hop < MAX_HOPS) {
-                    chain.append(code).append(' ').append(current).append('\n');
-                    chain.append("   -> ").append(loc).append('\n');
-                    pushCookies(current, hf);
-                    String pairs = cookiePairs(hf);
-                    if (pairs != null) extraCookie = mergeCookies(extraCookie, pairs);
-                    conn.disconnect();
-                    current = resolve(current, loc);
-                    continue;
+                Request.Builder rb = new Request.Builder().url(current).get();
+                if (reqHeaders != null) {
+                    for (Map.Entry<String, String> e : reqHeaders.entrySet()) {
+                        String k = e.getKey();
+                        if (k == null || skip(k)) continue;
+                        try {
+                            rb.header(k, e.getValue());
+                        } catch (Throwable ignored) { }
+                    }
+                }
+                if (extraCookie != null && extraCookie.length() > 0) {
+                    rb.header("Cookie", extraCookie);
                 }
 
-                byte[] data = read(conn, code);
-                rec.size = data.length;
-                rec.cost = System.currentTimeMillis() - t0;
-                rec.bodyPreview = preview(data, conn.getContentType());
-                rec.chain = chain.toString();
-                pushCookies(current, hf);
-                store.addRecord(rec);
+                Response resp = client.newCall(rb.build()).execute();
+                try {
+                    int code = resp.code();
+                    rec.status = code;
+                    rec.protocol = protoName(resp.protocol());
+                    rec.mime = mimeOf(resp.header("Content-Type"));
+                    rec.responseHeaders = dumpResp(resp.headers());
 
-                return new WebResourceResponse(rec.mime, charsetOf(conn.getContentType()),
-                        code, reason(code), clean(hf), new ByteArrayInputStream(data));
+                    String loc = resp.header("Location");
+                    if (loc != null && code >= 300 && code < 400 && hop < MAX_HOPS) {
+                        chain.append(code).append(' ').append(current.toString()).append('\n');
+                        chain.append("   -> ").append(loc).append('\n');
+                        List<String> sc = resp.headers("Set-Cookie");
+                        pushCookies(current.toString(), sc);
+                        String pairs = cookiePairs(sc);
+                        if (pairs != null) extraCookie = mergeCookies(extraCookie, pairs);
+                        HttpUrl next = current.resolve(loc);
+                        if (next == null) break;
+                        current = next;
+                        continue;
+                    }
+
+                    byte[] data = new byte[0];
+                    if (resp.body() != null) {
+                        data = resp.body().bytes();
+                        if (data.length > MAX_BODY) {
+                            byte[] cut = new byte[MAX_BODY];
+                            System.arraycopy(data, 0, cut, 0, MAX_BODY);
+                            data = cut;
+                        }
+                    }
+
+                    rec.size = data.length;
+                    rec.cost = System.currentTimeMillis() - t0;
+                    rec.bodyPreview = preview(data, resp.header("Content-Type"));
+                    rec.chain = chain.toString();
+                    pushCookies(current.toString(), resp.headers("Set-Cookie"));
+                    store.addRecord(rec);
+
+                    return new WebResourceResponse(rec.mime,
+                            charsetOf(resp.header("Content-Type")),
+                            code, reason(code), clean(resp.headers()),
+                            new ByteArrayInputStream(data));
+                } finally {
+                    resp.close();
+                }
             }
-
             chain.append("超过 ").append(MAX_HOPS).append(" 跳重定向，已放弃\n");
 
         } catch (Throwable t) {
@@ -108,41 +156,13 @@ public class Replay {
             rec.chain = chain.toString();
             rec.responseHeaders = "请求失败：" + t;
             store.addRecord(rec);
-        } finally {
-            if (conn != null) {
-                try { conn.disconnect(); } catch (Throwable ignored) { }
-            }
         }
         return null;
     }
 
-    private static HttpURLConnection open(String url, Map<String, String> reqHeaders,
-                                          String extraCookie) throws Exception {
-        HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
-        c.setRequestMethod("GET");
-        c.setInstanceFollowRedirects(false);
-        c.setConnectTimeout(15000);
-        c.setReadTimeout(30000);
-        c.setUseCaches(false);
-
-        if (reqHeaders != null) {
-            for (Map.Entry<String, String> e : reqHeaders.entrySet()) {
-                String k = e.getKey();
-                if (k == null || skip(k)) continue;
-                try {
-                    if (e.getValue() != null) c.setRequestProperty(k, e.getValue());
-                } catch (Throwable ignored) { }
-            }
-        }
-        if (extraCookie != null && extraCookie.length() > 0) {
-            c.setRequestProperty("Cookie", extraCookie);
-        }
-        return c;
-    }
-
     /**
      * 这几类头必须丢掉：Host/Connection 由客户端自己生成；
-     * Accept-Encoding 交给 HttpURLConnection 自动协商并解压；
+     * Accept-Encoding 交给 OkHttp 自动协商并解压；
      * 条件请求头会导致返回 304 空包，页面会变白。
      */
     private static boolean skip(String k) {
@@ -154,78 +174,51 @@ public class Replay {
                 || l.equals("if-modified-since") || l.equals("if-range");
     }
 
-    private static byte[] read(HttpURLConnection c, int code) throws Exception {
-        InputStream is = null;
-        try {
-            is = (code >= 400) ? c.getErrorStream() : c.getInputStream();
-            if (is == null) return new byte[0];
-            ByteArrayOutputStream bo = new ByteArrayOutputStream();
-            byte[] buf = new byte[16384];
-            int n;
-            while ((n = is.read(buf)) > 0) {
-                int allow = Math.min(n, MAX_BODY - bo.size());
-                if (allow > 0) bo.write(buf, 0, allow);
-                if (bo.size() >= MAX_BODY) break;
-            }
-            return bo.toByteArray();
-        } finally {
-            if (is != null) {
-                try { is.close(); } catch (Throwable ignored) { }
-            }
+    private static String dumpResp(Headers h) {
+        if (h == null || h.size() == 0) return "(空)";
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < h.size(); i++) {
+            sb.append(h.name(i)).append(": ").append(h.value(i)).append('\n');
         }
+        return sb.toString().trim();
     }
 
-    /** 回给 WebView 的头：去掉已经失效的压缩与长度信息，避免长度不符导致渲染失败 */
-    private static Map<String, String> clean(Map<String, List<String>> hf) {
+    /** 回给 WebView 的头：去掉已失效的压缩与长度信息，避免长度不符导致渲染失败 */
+    private static Map<String, String> clean(Headers h) {
         Map<String, String> out = new HashMap<String, String>();
-        if (hf == null) return out;
-        for (Map.Entry<String, List<String>> e : hf.entrySet()) {
-            String k = e.getKey();
-            if (k == null) continue;
+        if (h == null) return out;
+        for (int i = 0; i < h.size(); i++) {
+            String k = h.name(i);
             String l = k.toLowerCase();
             if (l.equals("content-length") || l.equals("content-encoding")
                     || l.equals("transfer-encoding") || l.equals("set-cookie")
                     || l.equals("connection") || l.equals("keep-alive")) continue;
-            List<String> v = e.getValue();
-            if (v == null || v.isEmpty()) continue;
-            StringBuilder sb = new StringBuilder();
-            for (int i = 0; i < v.size(); i++) {
-                if (i > 0) sb.append(", ");
-                sb.append(v.get(i));
-            }
-            out.put(k, sb.toString());
+            String prev = out.get(k);
+            out.put(k, prev == null ? h.value(i) : prev + ", " + h.value(i));
         }
         return out;
     }
 
-    private static void pushCookies(String url, Map<String, List<String>> hf) {
+    private static void pushCookies(String url, List<String> setCookies) {
+        if (setCookies == null || setCookies.isEmpty()) return;
         try {
             CookieManager cm = CookieManager.getInstance();
             cm.setAcceptCookie(true);
-            for (Map.Entry<String, List<String>> e : hf.entrySet()) {
-                String k = e.getKey();
-                if (k == null || !k.equalsIgnoreCase("set-cookie")) continue;
-                List<String> v = e.getValue();
-                if (v == null) continue;
-                for (int i = 0; i < v.size(); i++) cm.setCookie(url, v.get(i));
+            for (int i = 0; i < setCookies.size(); i++) {
+                cm.setCookie(url, setCookies.get(i));
             }
             cm.flush();
         } catch (Throwable ignored) { }
     }
 
-    private static String cookiePairs(Map<String, List<String>> hf) {
+    private static String cookiePairs(List<String> setCookies) {
+        if (setCookies == null || setCookies.isEmpty()) return null;
         StringBuilder sb = new StringBuilder();
-        for (Map.Entry<String, List<String>> e : hf.entrySet()) {
-            String k = e.getKey();
-            if (k == null || !k.equalsIgnoreCase("set-cookie")) continue;
-            List<String> v = e.getValue();
-            if (v == null) continue;
-            for (int i = 0; i < v.size(); i++) {
-                String s = v.get(i);
-                if (s == null) continue;
-                int cut = s.indexOf(';');
-                sb.append(cut > 0 ? s.substring(0, cut) : s).append("; ");
-            }
+        for (int i = 0; i < setCookies.size(); i++) {
+            String s = setCookies.get(i);
+            if (s == null) continue;
+            int cut = s.indexOf(';');
+            sb.append(cut > 0 ? s.substring(0, cut) : s).append("; ");
         }
         return sb.length() == 0 ? null : sb.toString();
     }
@@ -235,12 +228,12 @@ public class Replay {
         return old + add;
     }
 
-    private static String resolve(String base, String loc) {
-        try {
-            return new URL(new URL(base), loc).toString();
-        } catch (Throwable t) {
-            return loc;
-        }
+    private static String protoName(Protocol p) {
+        if (p == null) return "";
+        if (p == Protocol.HTTP_2) return "HTTP/2";
+        if (p == Protocol.HTTP_1_1) return "HTTP/1.1";
+        if (p == Protocol.H2_PRIOR_KNOWLEDGE) return "HTTP/2 (h2c)";
+        return p.toString().toUpperCase();
     }
 
     private static String preview(byte[] data, String ct) {
@@ -276,14 +269,6 @@ public class Replay {
         int i = ct.indexOf(';');
         String m = (i > 0 ? ct.substring(0, i) : ct).trim();
         return m.length() == 0 ? "application/octet-stream" : m;
-    }
-
-    /** 从状态行取出真实的协议版本，例如 "HTTP/1.1 200 OK" -> "HTTP/1.1" */
-    private static String protoOf(String statusLine) {
-        if (statusLine == null) return "HTTP/1.1";
-        int sp = statusLine.indexOf(' ');
-        String p = sp > 0 ? statusLine.substring(0, sp) : statusLine;
-        return p.startsWith("HTTP/") ? p : "HTTP/1.1";
     }
 
     private static String reason(int code) {
