@@ -164,8 +164,12 @@ public class Replay {
                     // 所以主文档的 3xx 无法"透传"，只能记一笔真实状态再返回 null，
                     // 让 WebView 自己重新请求并跟随跳转 —— 文档 URL 由 Chromium 维护，
                     // 相对路径才不会解析错。
-                    if (mainFrame && loc != null && code >= 300 && code < 400) {
-                        rec.note = code + " → 交回 WebView 自行跳转";
+                    // 任何 3xx 都不能构造 WebResourceResponse（statusCode 不允许 300–399），
+                    // 所以不看有没有 Location，一律记一笔再交回 WebView。
+                    if (mainFrame && code >= 300 && code < 400) {
+                        rec.note = code + (loc != null
+                                ? " → 交回 WebView 自行跳转"
+                                : " → 交回 WebView 重新请求");
                         rec.finalUrl = current.toString();
                         rec.cost = System.currentTimeMillis() - t0;
                         store.addRecord(rec);
