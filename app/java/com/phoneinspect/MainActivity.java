@@ -880,24 +880,44 @@ public class MainActivity extends Activity {
             String method = r.getMethod() == null ? "GET" : r.getMethod();
             Map<String, String> h = r.getRequestHeaders();
 
+            // 主文档请求 = 一次新导航的分界点。用它而不是 onPageStarted：
+            // onPageStarted 比 shouldInterceptRequest 晚，主文档那条记录会被算进上一段
+            int nav;
+            String page;
+            if (r.isForMainFrame()) {
+                nav = store.startNav(url);
+                page = url;
+            } else {
+                nav = store.currentNav;
+                page = store.currentPageUrl;
+            }
+
             if (mode == Net.MODE_RECORD || !"GET".equalsIgnoreCase(method)) {
                 Net.Record rec = new Net.Record();
+                rec.kind = Net.Record.KIND_SKIPPED_BEFORE;
+                rec.navId = nav;
+                rec.pageUrl = page;
                 rec.method = method;
                 rec.url = url;
                 rec.mainFrame = r.isForMainFrame();
+                rec.note = mode == Net.MODE_RECORD ? "仅记录模式，未重放" : "非 GET，未重放";
                 rec.requestHeaders = Replay.dump(h);
                 rec.responseHeaders = "(未拦截，无响应信息)";
                 store.addRecord(rec);
                 return null;
             }
 
-            return Replay.fetch(url, h, r.isForMainFrame(), store, proto);
+            return Replay.fetch(url, h, r.isForMainFrame(), store, proto, nav, page);
 
         } catch (Throwable t) {
             try {
                 Net.Record rec = new Net.Record();
+                rec.kind = Net.Record.KIND_FAILED;
+                rec.navId = store.currentNav;
+                rec.pageUrl = store.currentPageUrl;
                 rec.method = "?";
                 rec.url = String.valueOf(r.getUrl());
+                rec.note = "拦截层异常";
                 rec.responseHeaders = "拦截层异常，已回退到 WebView 原生请求：\n" + t;
                 store.addRecord(rec);
             } catch (Throwable ignored) { }
@@ -909,6 +929,8 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void log(String level, String msg) {
             Net.LogItem l = new Net.LogItem();
+            l.navId = store.currentNav;
+            l.pageUrl = store.currentPageUrl;
             l.level = level == null || level.length() == 0 ? "log" : level;
             l.msg = msg == null ? "" : msg;
             store.addLog(l);

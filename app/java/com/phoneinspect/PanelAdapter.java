@@ -17,15 +17,11 @@ import java.util.List;
 /**
  * 列表数据层。
  *
- * 之前 adapter 直接按 position 读 store.records，而 Store.addRecord() 是头插：
- * 页面加载中每来一个请求，整个列表就下移一行，用户点第 3 行打开的是第 4 条。
- *
- * 现在改成分两步：
  * 1. 每次刷新先取一份快照（reload），渲染和点击都对着同一份快照；
  * 2. 记录带稳定 id，点击时优先用「被点那一行自己携带的 id」（View tag）反查，
- *    即使快照刚换过，打开的也一定是用户眼睛看到的那条。
- *
- * 后面加导航分隔行 / 搜索筛选时，只需要改 netRows 的构造，渲染层不用动。
+ *    即使快照刚换过，打开的也一定是用户看到的那条；
+ * 3. 按 navId 插入分段行，换页后的记录不会和上一页混在一起；
+ * 4. 状态按四态着色：已接管（绿）/ 未发送（灰）/ 已探测未接管（橙）/ 失败（红）。
  */
 public class PanelAdapter extends BaseAdapter {
 
@@ -39,9 +35,9 @@ public class PanelAdapter extends BaseAdapter {
     private final Net.Store store = Net.Store.get();
     private int tab = TAB_NET;
 
-    /** 当前渲染用的快照，position 只对这份列表有效 */
-    private final List<Net.Record> netRows = new ArrayList<Net.Record>();
-    private final List<Net.LogItem> logRows = new ArrayList<Net.LogItem>();
+    /** 渲染用的行快照：分隔行 + 数据行混排，position 只对这份列表有效 */
+    private final List<Row> netRows = new ArrayList<Row>();
+    private final List<Row> logRows = new ArrayList<Row>();
 
     public PanelAdapter(Context c) {
         this.ctx = c;
@@ -52,25 +48,64 @@ public class PanelAdapter extends BaseAdapter {
         notifyDataSetChanged();
     }
 
-    /** 取快照。之后加分隔行 / 过滤都在这里改写 netRows 的构造方式 */
+    /** 取快照：把「记录列表」翻译成「行列表」，中间插入导航分隔行 */
     public void reload() {
         if (tab == TAB_NET) {
+            List<Net.Record> copy;
             synchronized (store.records) {
-                netRows.clear();
-                netRows.addAll(store.records);
+                copy = new ArrayList<Net.Record>(store.records);
+            }
+            netRows.clear();
+            int lastNav = Integer.MIN_VALUE;
+            for (int i = 0; i < copy.size(); i++) {
+                Net.Record r = copy.get(i);
+                if (r.navId != lastNav) {
+                    netRows.add(header(r.navId, r.pageUrl));
+                    lastNav = r.navId;
+                }
+                Row row = new Row();
+                row.type = Row.RECORD;
+                row.id = r.id;
+                row.r = r;
+                netRows.add(row);
             }
         } else if (tab == TAB_LOG) {
+            List<Net.LogItem> copy;
             synchronized (store.logs) {
-                logRows.clear();
-                logRows.addAll(store.logs);
+                copy = new ArrayList<Net.LogItem>(store.logs);
+            }
+            logRows.clear();
+            int lastNav = Integer.MIN_VALUE;
+            for (int i = 0; i < copy.size(); i++) {
+                Net.LogItem l = copy.get(i);
+                if (l.navId != lastNav) {
+                    logRows.add(header(l.navId, l.pageUrl));
+                    lastNav = l.navId;
+                }
+                Row row = new Row();
+                row.type = Row.LOG;
+                row.id = l.id;
+                row.l = l;
+                logRows.add(row);
             }
         }
     }
 
-    /** 刷新入口统一在这里重新取快照，避免出现「数据和行数不同步」的帧 */
+    /** 统一入口：先重新取快照再通知，避免出现「行数和数据不同步」的那一帧 */
     public void notifyDataSetChanged() {
         reload();
         super.notifyDataSetChanged();
+    }
+
+    private Row header(int navId, String pageUrl) {
+        Row row = new Row();
+        row.type = Row.HEADER;
+        row.navId = navId;
+        // 分隔行用负数 id，和记录的 id 不冲突（记录 id 从 1 开始）
+        row.id = -1000000L * (navId + 1) - 1;
+        String where = pageUrl == null || pageUrl.length() == 0 ? "(未知页面)" : pageUrl;
+        row.title = (navId <= 0 ? "切换前" : "#" + navId) + "  " + where;
+        return row;
     }
 
     public int getCount() {
@@ -80,20 +115,14 @@ public class PanelAdapter extends BaseAdapter {
     }
 
     public Object getItem(int p) {
-        if (tab == TAB_NET) {
-            return p >= 0 && p < netRows.size() ? netRows.get(p) : null;
-        }
-        if (tab == TAB_LOG) {
-            return p >= 0 && p < logRows.size() ? logRows.get(p) : null;
-        }
+        if (tab == TAB_NET) return p >= 0 && p < netRows.size() ? netRows.get(p) : null;
+        if (tab == TAB_LOG) return p >= 0 && p < logRows.size() ? logRows.get(p) : null;
         return null;
     }
 
     public long getItemId(int p) {
         Object o = getItem(p);
-        if (o instanceof Net.Record) return ((Net.Record) o).id;
-        if (o instanceof Net.LogItem) return ((Net.LogItem) o).id;
-        return -1;
+        return o instanceof Row ? ((Row) o).id : -1;
     }
 
     public boolean hasStableIds() {
@@ -111,15 +140,29 @@ public class PanelAdapter extends BaseAdapter {
         }
         if (id > 0) {
             for (int i = 0; i < netRows.size(); i++) {
-                if (netRows.get(i).id == id) return netRows.get(i);
+                Row r = netRows.get(i);
+                if (r.type == Row.RECORD && r.id == id) return r.r;
             }
         }
         Object o = getItem(pos);
-        return o instanceof Net.Record ? (Net.Record) o : null;
+        return o instanceof Row && ((Row) o).r != null ? ((Row) o).r : null;
+    }
+
+    public static class Row {
+        public static final int HEADER = 0;
+        public static final int RECORD = 1;
+        public static final int LOG = 2;
+
+        public int type;
+        public long id;
+        public int navId;
+        public String title;
+        public Net.Record r;
+        public Net.LogItem l;
     }
 
     static class Holder {
-        int type;
+        int kind;
         long recId;
         TextView method;
         TextView path;
@@ -129,26 +172,42 @@ public class PanelAdapter extends BaseAdapter {
     }
 
     public View getView(int pos, View cv, ViewGroup parent) {
+        Row row = (Row) getItem(pos);
+        if (row == null) return cv == null ? new TextView(ctx) : cv;
+
         Holder h;
-        if (cv == null || !(cv.getTag() instanceof Holder) || ((Holder) cv.getTag()).type != tab) {
+        if (cv == null || !(cv.getTag() instanceof Holder) || ((Holder) cv.getTag()).kind != row.type) {
             h = new Holder();
-            h.type = tab;
-            cv = build(h);
+            h.kind = row.type;
+            cv = build(h, row.type);
             cv.setTag(h);
         } else {
             h = (Holder) cv.getTag();
         }
 
-        if (tab == TAB_NET) {
-            bindNet(h, pos);
+        if (row.type == Row.HEADER) {
+            h.text.setText(row.title);
+        } else if (row.type == Row.RECORD) {
+            bindNet(h, row.r);
         } else {
-            bindLog(h, pos);
+            bindLog(h, row.l);
         }
         return cv;
     }
 
-    private View build(Holder h) {
-        if (tab == TAB_NET) {
+    private View build(Holder h, int kind) {
+        if (kind == Row.HEADER) {
+            h.text = new TextView(ctx);
+            h.text.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f);
+            h.text.setTextColor(0xFF7C8593);
+            h.text.setBackgroundColor(0xFF1B1F26);
+            h.text.setPadding(dp(12), dp(5), dp(12), dp(5));
+            h.text.setSingleLine(true);
+            h.text.setEllipsize(TextUtils.TruncateAt.MIDDLE);
+            return h.text;
+        }
+
+        if (kind == Row.RECORD) {
             LinearLayout row = new LinearLayout(ctx);
             row.setOrientation(LinearLayout.VERTICAL);
             row.setPadding(dp(12), dp(8), dp(12), dp(8));
@@ -168,7 +227,7 @@ public class PanelAdapter extends BaseAdapter {
                     ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
             h.status = text(10.5f, 0xFF8B929E, true);
-            h.status.setPadding(dp(8), 0, 0, 0);
+            h.status.setPadding(dp(8), 0, dp(4), 0);
             top.addView(h.status);
 
             row.addView(top);
@@ -187,20 +246,18 @@ public class PanelAdapter extends BaseAdapter {
         return h.text;
     }
 
-    private void bindNet(Holder h, int pos) {
-        if (pos < 0 || pos >= netRows.size()) return;
-        Net.Record r = netRows.get(pos);
+    private void bindNet(Holder h, Net.Record r) {
+        if (r == null) return;
         h.recId = r.id;
         h.method.setText(r.method);
         h.path.setText(pathOf(r.url));
-        h.status.setText(statusText(r.status));
-        h.status.setTextColor(statusColor(r.status));
+        h.status.setText(statusText(r));
+        h.status.setTextColor(statusColor(r));
         h.sub.setText(subOf(r));
     }
 
-    private void bindLog(Holder h, int pos) {
-        if (pos < 0 || pos >= logRows.size()) return;
-        Net.LogItem l = logRows.get(pos);
+    private void bindLog(Holder h, Net.LogItem l) {
+        if (l == null) return;
         h.recId = l.id;
         h.text.setText("[" + l.level + "] " + l.msg);
         h.text.setTextColor(logColor(l.level));
@@ -222,15 +279,30 @@ public class PanelAdapter extends BaseAdapter {
         }
     }
 
-    private String statusText(int s) {
-        if (s < 0) return "ERR";
-        return String.valueOf(s);
+    /**
+     * 状态列。四态各自说自己的话：
+     * 有码就显示码（橙色表示"拿到了但内容没回填"），没码就说清楚是没发还是失败。
+     */
+    private String statusText(Net.Record r) {
+        if (r.kind == Net.Record.KIND_SKIPPED_BEFORE) return "跳过";
+        if (r.kind == Net.Record.KIND_FAILED) return "失败";
+        return r.status < 0 ? "—" : String.valueOf(r.status);
     }
 
-    private int statusColor(int s) {
-        if (s < 0) return 0xFFFF6B6B;
-        if (s < 300) return 0xFF3FD07A;
-        if (s < 400) return 0xFFFFB454;
+    private int statusColor(Net.Record r) {
+        switch (r.kind) {
+            case Net.Record.KIND_SKIPPED_BEFORE:
+                return 0xFF8B929E;
+            case Net.Record.KIND_SKIPPED_AFTER:
+                return 0xFFFFB454;
+            case Net.Record.KIND_FAILED:
+                return 0xFFFF6B6B;
+            default:
+                break;
+        }
+        if (r.status < 0) return 0xFFFF6B6B;
+        if (r.status < 300) return 0xFF3FD07A;
+        if (r.status < 400) return 0xFFFFB454;
         return 0xFFFF6B6B;
     }
 
@@ -246,19 +318,31 @@ public class PanelAdapter extends BaseAdapter {
         StringBuilder sb = new StringBuilder();
         if (r.mainFrame) sb.append("主文档");
 
-        if (r.status < 0) {
+        boolean skipped = r.kind != Net.Record.KIND_INTERCEPTED;
+        String note = r.note == null ? "" : r.note;
+
+        if (skipped) {
             if (sb.length() > 0) sb.append(" · ");
-            sb.append("未拦截");
+            sb.append(note.length() > 0 ? note : kindWord(r.kind));
             return sb.toString();
         }
         if (sb.length() > 0) sb.append(" · ");
 
-        if (r.note != null && r.note.length() > 0) {
-            sb.append(r.note);
+        if (note.length() > 0) {
+            sb.append(note);
         } else {
             sb.append(r.cost).append("ms").append(" · ").append(size(r.size));
         }
         return sb.toString();
+    }
+
+    private String kindWord(int kind) {
+        switch (kind) {
+            case Net.Record.KIND_SKIPPED_BEFORE: return "未发送请求";
+            case Net.Record.KIND_SKIPPED_AFTER: return "已探测，内容未接管";
+            case Net.Record.KIND_FAILED: return "请求失败";
+            default: return "";
+        }
     }
 
     private String size(long b) {

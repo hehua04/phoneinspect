@@ -17,8 +17,22 @@ public class Net {
     public static final int PROTO_H2 = 2;
 
     public static class Record {
+        /**
+         * 一条记录最终落在哪个出口。status=-1 曾经同时代表"没发请求""发了但没回填""真的失败"
+         * 三种情况，界面只能一律显示 ERR · 未拦截，把失败原因也吞掉了。
+         */
+        public static final int KIND_INTERCEPTED = 0;    // 有状态码，内容由本工具回填
+        public static final int KIND_SKIPPED_BEFORE = 1; // 没发请求（非 GET / 仅记录模式）
+        public static final int KIND_SKIPPED_AFTER = 2;  // 发了、有状态码，但内容没回填
+        public static final int KIND_FAILED = 3;         // 抛异常
+
         /** 稳定 id，由 Store 分配；列表点击靠它反查，不受头插影响 */
         public long id = 0;
+        public int kind = KIND_INTERCEPTED;
+        /** 属于第几次页面导航，用来在列表里分段 */
+        public int navId = 0;
+        /** 这条请求发生在哪个页面上（不是请求自身的 URL） */
+        public String pageUrl = "";
         public String method = "";
         public String url = "";
         public String requestHeaders = "";
@@ -38,6 +52,8 @@ public class Net {
 
     public static class LogItem {
         public long id = 0;
+        public int navId = 0;
+        public String pageUrl = "";
         public String level = "log";
         public String msg = "";
         public long time = System.currentTimeMillis();
@@ -60,6 +76,21 @@ public class Net {
 
         private long recordSeq = 0;
         private long logSeq = 0;
+
+        /** 当前是第几次导航、落在哪个页面；由主文档请求触发（见 MainActivity.handle） */
+        public volatile int currentNav = 0;
+        public volatile String currentPageUrl = "";
+
+        /**
+         * 主文档请求被拦截时开一段新导航。
+         * 用"主文档请求"当分界点，而不是 onPageStarted：后者比 shouldInterceptRequest 晚，
+         * 主文档那条记录会落到上一段的末尾。
+         */
+        public synchronized int startNav(String url) {
+            currentNav = currentNav + 1;
+            currentPageUrl = url == null ? "" : url;
+            return currentNav;
+        }
 
         public void addRecord(final Record r) {
             synchronized (records) {

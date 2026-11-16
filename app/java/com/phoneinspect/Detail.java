@@ -63,6 +63,9 @@ public class Detail {
         head(sb, "请求");
         sb.append(r.method).append(' ').append(r.url).append('\n');
         if (r.mainFrame) sb.append("(主文档请求)\n");
+        if (r.pageUrl != null && r.pageUrl.length() > 0 && !r.pageUrl.equals(r.url)) {
+            sb.append("所在页面: ").append(r.pageUrl).append('\n');
+        }
         if (r.finalUrl != null && r.finalUrl.length() > 0 && !r.finalUrl.equals(r.url)) {
             sb.append("最终地址: ").append(r.finalUrl).append('\n');
         }
@@ -73,10 +76,12 @@ public class Detail {
 
         head(sb, "响应");
         String proto = (r.protocol == null || r.protocol.length() == 0) ? "HTTP/1.1" : r.protocol;
-        sb.append(proto).append(' ').append(r.status < 0 ? "ERR" : String.valueOf(r.status));
+        sb.append(proto).append(' ').append(statusOf(r));
         if (r.cost > 0) sb.append("    ").append(r.cost).append("ms");
         if (r.size > 0) sb.append("    ").append(r.size).append(" bytes");
         sb.append('\n');
+        String kind = kindLine(r);
+        if (kind.length() > 0) sb.append("状态: ").append(kind).append('\n');
         if (r.note != null && r.note.length() > 0) {
             sb.append("说明: ").append(r.note).append('\n');
         }
@@ -95,6 +100,27 @@ public class Detail {
             sb.append(r.bodyPreview).append('\n');
         }
         return sb.toString();
+    }
+
+    private static String statusOf(Net.Record r) {
+        if (r.kind == Net.Record.KIND_SKIPPED_BEFORE) return "—（未发送请求）";
+        if (r.kind == Net.Record.KIND_FAILED) return "失败";
+        return r.status < 0 ? "—" : String.valueOf(r.status);
+    }
+
+    /** 详情页把「这条到底发生了什么」说透，而不是只给一个 ERR */
+    private static String kindLine(Net.Record r) {
+        switch (r.kind) {
+            case Net.Record.KIND_SKIPPED_BEFORE:
+                return "没有发送请求。真实请求由 WebView 自己发出，本工具没有它的响应信息。";
+            case Net.Record.KIND_SKIPPED_AFTER:
+                return "请求已经发出并拿到响应，但内容没有回填给 WebView；"
+                        + "WebView 会再发一次，所以服务端可能收到两次。";
+            case Net.Record.KIND_FAILED:
+                return "重放失败，已回退到 WebView 的原生请求。";
+            default:
+                return r.mainFrame ? "已接管，主文档内容由本工具回填。" : "";
+        }
     }
 
     private static void head(StringBuilder sb, String t) {

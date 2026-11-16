@@ -162,7 +162,8 @@ public class Replay {
     }
 
     public static WebResourceResponse fetch(String url, Map<String, String> reqHeaders,
-                                            boolean mainFrame, Net.Store store, int protoChoice) {
+                                            boolean mainFrame, Net.Store store, int protoChoice,
+                                            int navId, String pageUrl) {
         HttpUrl current = HttpUrl.parse(url);
         if (current == null) return null;
 
@@ -170,6 +171,8 @@ public class Replay {
         rec.method = "GET";
         rec.url = url;
         rec.mainFrame = mainFrame;
+        rec.navId = navId;
+        rec.pageUrl = pageUrl;
         rec.requestHeaders = dump(reqHeaders);
         long t0 = System.currentTimeMillis();
         StringBuilder chain = new StringBuilder();
@@ -206,6 +209,7 @@ public class Replay {
                     // 「探测 H2」：协议列表里必须留着 h1，所以只能在协商结果上判断。
                     // 不是 h2 就记一笔交回 WebView，等效于告诉用户这站没开 h2。
                     if (protoChoice == Net.PROTO_H2 && resp.protocol() != Protocol.HTTP_2) {
+                        rec.kind = Net.Record.KIND_SKIPPED_AFTER;
                         rec.note = "服务端没协商到 HTTP/2（实际 " + rec.protocol + "）";
                         rec.finalUrl = current.toString();
                         rec.cost = System.currentTimeMillis() - t0;
@@ -234,6 +238,7 @@ public class Replay {
                     // 任何 3xx 都不能构造 WebResourceResponse（statusCode 不允许 300–399），
                     // 所以不看有没有 Location，一律记一笔再交回 WebView。
                     if (mainFrame && code >= 300 && code < 400) {
+                        rec.kind = Net.Record.KIND_SKIPPED_AFTER;
                         rec.note = code + (loc != null
                                 ? " → 交回 WebView 自行跳转"
                                 : " → 交回 WebView 重新请求");
@@ -247,6 +252,7 @@ public class Replay {
                     long declared = body == null ? -1 : body.contentLength();
 
                     if (isStream(ct) || declared > MAX_BODY) {
+                        rec.kind = Net.Record.KIND_SKIPPED_AFTER;
                         rec.note = isStream(ct)
                                 ? "流媒体，跳过重放"
                                 : "超过 " + (MAX_BODY / 1024 / 1024) + "MB，跳过重放";
@@ -260,6 +266,7 @@ public class Replay {
 
                     byte[] data = readCapped(body);
                     if (data == null) {
+                        rec.kind = Net.Record.KIND_SKIPPED_AFTER;
                         rec.note = "超过 " + (MAX_BODY / 1024 / 1024) + "MB，跳过重放";
                         rec.responseHeaders = rec.responseHeaders
                                 + "\n\n(" + rec.note + "，已交由 WebView 直接加载，该请求会再发一次)";
@@ -307,6 +314,7 @@ public class Replay {
             chain.append("超过 ").append(MAX_HOPS).append(" 跳重定向，已放弃\n");
 
         } catch (Throwable t) {
+            rec.kind = Net.Record.KIND_FAILED;
             rec.status = -1;
             rec.cost = System.currentTimeMillis() - t0;
             rec.chain = chain.toString();
