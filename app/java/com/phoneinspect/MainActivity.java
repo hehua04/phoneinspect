@@ -289,8 +289,18 @@ public class MainActivity extends Activity {
         if (dir == null) return;
         File[] all = dir.listFiles();
         if (all == null || all.length == 0) return;
-        Arrays.sort(all, byTime(false));
-        File newest = all[0];
+
+        // 只播报没播报过的：播报过的文件名以 .seen 结尾。
+        // 原来按 mtime 取最新再改名，可改名本身会把 mtime 刷新成"最新"，
+        // 于是同一份崩溃每次启动都被重新播报一遍（现场留下了 .seen.seen.seen 这样的文件名）。
+        File newest = null;
+        for (int i = 0; i < all.length; i++) {
+            File f = all[i];
+            if (f.getName().endsWith(".seen")) continue;
+            if (newest == null || f.lastModified() > newest.lastModified()) newest = f;
+        }
+        if (newest == null) return;
+
         String text = readSmall(newest, 6000);
         if (text.length() == 0) return;
 
@@ -1276,6 +1286,9 @@ public class MainActivity extends Activity {
 
     private void captureDom() {
         domBuf.setLength(0);
+        // 换站后重抓时，先退回"正在抓取"占位：
+        // 继续显示上一站的 DOM 会让人以为当前页就长这样（抓取要几十毫秒到几百毫秒）
+        if (isForeign(store.domUrl)) store.setDom(store.domUrl, "");
         renderSource();
         if (web != null) {
             web.evaluateJavascript("window.__PI_DOM&&window.__PI_DOM();", null);

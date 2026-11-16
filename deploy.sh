@@ -42,11 +42,22 @@ fi
 echo "    APK = $ACTUAL_N ($ACTUAL_C)"
 
 echo "==> 安装"
-PORT="$(adb mdns services 2>/dev/null \
-        | grep -oE '[0-9]{1,3}(\.[0-9]{1,3}){3}:[0-9]+' | head -1)"
-if [ -n "$PORT" ]; then
-  adb connect "$PORT" >/dev/null 2>&1
-  echo "    设备 $PORT"
+# mdns 在 Windows 上经常什么也发现不了（后台服务偶发失效），
+# 而且一旦 adb server 被重启（比如构建期间别的 adb 命令），已有的无线连接会直接掉。
+# 所以允许手动指定：ADB_TARGET=192.168.3.56:42883 bash deploy.sh
+TARGET="${ADB_TARGET:-}"
+if [ -z "$TARGET" ]; then
+  TARGET="$(adb mdns services 2>/dev/null \
+            | grep -oE '[0-9]{1,3}(\.[0-9]{1,3}){3}:[0-9]+' | head -1)"
+fi
+if [ -n "$TARGET" ]; then
+  adb connect "$TARGET" >/dev/null 2>&1
+  echo "    设备 $TARGET"
+fi
+if ! adb devices 2>/dev/null | tr -d '\r' | grep -qE '[[:space:]]device$'; then
+  echo "!! 没有可用设备。无线调试端口每次打开都会变，可以显式指定："
+  echo "   ADB_TARGET=<手机IP>:<端口> bash deploy.sh"
+  exit 1
 fi
 OUT="$(adb install -r "$APK" 2>&1 | tail -1)"
 echo "    $OUT"
