@@ -83,6 +83,10 @@ public class Net {
             synchronized (records) { records.clear(); }
         }
 
+        /** 用户点了「继续访问」的 host:port，只在本次进程内有效 */
+        public final java.util.Set<String> insecureHosts =
+                java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
+
         /** 主文档的服务器原始字节解码后的文本，来自拦截层，不是 DOM 序列化 */
         public volatile String sourceHtml = "";
         public volatile String sourceUrl = "";

@@ -174,3 +174,11 @@ build.sh                        一条命令出 APK
 ### 拾取模式不该弹键盘
 
 输入框被点过之后，`document.activeElement` 仍然是它；拾取模式拦截了 `click`，浏览器默认的「点别处让输入框失焦」也就没发生，于是输入法随时可能再弹出来。修法是进入拾取模式和每次 `touchstart` 时都主动 `document.activeElement.blur()`，原生侧再补一次 `hideSoftInputFromWindow`。
+
+## 自签名证书
+
+访问证书不受信任的站点（自签名、证书链不完整）时会弹窗，可选「继续访问（不安全）」。确认后该 `host:port` 在本次运行内被记住，重放层与 WebView 都不再校验它的证书。
+
+两条链路都要处理：我们自己的 OkHttp 重放，和 WebView 自己的请求（POST、未拦截的资源）。弹窗统一走 `onReceivedSslError` —— 重放失败后返回 `null`，WebView 会重试并触发它，所以在那一处弹一次即可。
+
+例外只在进程内有效，重启 App 会重新询问；这是刻意的，避免一次误点变成长期后门。

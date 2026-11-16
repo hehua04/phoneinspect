@@ -1,7 +1,9 @@
 package com.phoneinspect;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.Context;
+import android.content.DialogInterface;
 import android.content.pm.PackageInfo;
 import android.content.res.Configuration;
 import android.graphics.Bitmap;
@@ -9,6 +11,7 @@ import android.graphics.Rect;
 import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
+import android.net.http.SslError;
 import android.os.Build;
 import android.os.Bundle;
 import android.text.Editable;
@@ -25,6 +28,7 @@ import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
 import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
+import android.webkit.SslErrorHandler;
 import android.webkit.ValueCallback;
 import android.webkit.WebBackForwardList;
 import android.webkit.WebChromeClient;
@@ -823,6 +827,10 @@ public class MainActivity extends Activity {
             setUrlText(u);
             inject();
         }
+
+        public void onReceivedSslError(WebView v, SslErrorHandler handler, SslError error) {
+            promptWebSsl(handler, error);
+        }
     }
 
     /** 主页是内嵌的 data 页面，显示 about:blank 没有意义，直接清空让提示语露出来 */
@@ -1040,6 +1048,86 @@ public class MainActivity extends Activity {
         tabLog.setText("控制台 " + store.logCount());
         if (netAdapter != null) netAdapter.notifyDataSetChanged();
         if (logAdapter != null) logAdapter.notifyDataSetChanged();
+    }
+
+    // ---- 证书例外 ----
+
+    private boolean sslDialogShowing = false;
+
+    private String hostKeyOf(String url) {
+        try {
+            java.net.URI u = new java.net.URI(url);
+            String host = u.getHost();
+            if (host == null) return "";
+            int port = u.getPort();
+            if (port < 0) port = "https".equalsIgnoreCase(u.getScheme()) ? 443 : 80;
+            return host + ":" + port;
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
+    /**
+     * 证书错误的唯一入口。重放层失败后返回 null，WebView 会自己重试，
+     * 于是走到这里 —— 只在这条路径弹窗，避免同一请求弹两次。
+     */
+    private void promptWebSsl(final SslErrorHandler handler, SslError error) {
+        if (handler == null) return;
+        final String key = hostKeyOf(error == null ? "" : error.getUrl());
+
+        // 本会话已信任过就直接放行，否则每个子资源都会弹一次
+        if (key.length() > 0 && store.insecureHosts.contains(key)) {
+            handler.proceed();
+            return;
+        }
+        if (isFinishing() || sslDialogShowing) {
+            handler.cancel();
+            return;
+        }
+        sslDialogShowing = true;
+        final String url = error == null ? "" : error.getUrl();
+
+        new AlertDialog.Builder(this)
+                .setTitle("证书不受信任")
+                .setMessage(url + "\n\n" + describeSsl(error)
+                        + "\n\n继续访问会关闭该站点（含重放层）的证书校验，"
+                        + "流量可能被窃听或篡改，仅建议在调试自有服务时使用。\n\n"
+                        + "该例外只在本次运行内有效，重启 App 后会重新询问。")
+                .setPositiveButton("继续访问（不安全）", new DialogInterface.OnClickListener() {
+                    public void onClick(DialogInterface d, int w) {
+                        sslDialogShowing = false;
+                        if (key.length() > 0) store.insecureHosts.add(key);
+                        // 直接放行这次请求；后续子资源由重放层接手，那边已经信任该 host，
+                        // 所以不需要 reload（cancel + reload 会把已中止的导航退回上一页）
+                        handler.proceed();
+                    }
+                })
+                .setNegativeButton("取消", new DialogInterface.OnClickListener() {
+                    public void onClick(DialogInterface d, int w) {
+                        sslDialogShowing = false;
+                        handler.cancel();
+                    }
+                })
+                .setOnCancelListener(new DialogInterface.OnCancelListener() {
+                    public void onCancel(DialogInterface d) {
+                        sslDialogShowing = false;
+                        handler.cancel();
+                    }
+                })
+                .show();
+    }
+
+    private String describeSsl(SslError e) {
+        if (e == null) return "证书校验失败";
+        switch (e.getPrimaryError()) {
+            case SslError.SSL_EXPIRED: return "证书已过期";
+            case SslError.SSL_IDMISMATCH: return "证书域名与访问地址不匹配";
+            case SslError.SSL_UNTRUSTED: return "证书颁发机构不受信任（多为自签名）";
+            case SslError.SSL_NOTYETVALID: return "证书尚未生效";
+            case SslError.SSL_DATE_INVALID: return "证书日期无效";
+            case SslError.SSL_INVALID: return "证书格式无效";
+            default: return "证书校验失败";
+        }
     }
 
     // ---- 元素拾取 ----

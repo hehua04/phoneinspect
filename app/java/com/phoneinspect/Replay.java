@@ -8,11 +8,19 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.Charset;
+import java.security.SecureRandom;
+import java.security.cert.X509Certificate;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
+
+import javax.net.ssl.HostnameVerifier;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLSession;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
 
 import okhttp3.Headers;
 import okhttp3.HttpUrl;
@@ -69,31 +77,79 @@ public class Replay {
 
     private static OkHttpClient CLIENT_H1;
     private static OkHttpClient CLIENT_H2;
+    private static OkHttpClient CLIENT_H1_INSECURE;
+    private static OkHttpClient CLIENT_H2_INSECURE;
 
-    private static synchronized OkHttpClient client(int choice) {
+    private static synchronized OkHttpClient client(int choice, boolean insecure) {
         if (choice == Net.PROTO_H1) {
-            if (CLIENT_H1 == null) CLIENT_H1 = build(Arrays.asList(Protocol.HTTP_1_1));
+            if (insecure) {
+                if (CLIENT_H1_INSECURE == null) {
+                    CLIENT_H1_INSECURE = build(Arrays.asList(Protocol.HTTP_1_1), true);
+                }
+                return CLIENT_H1_INSECURE;
+            }
+            if (CLIENT_H1 == null) CLIENT_H1 = build(Arrays.asList(Protocol.HTTP_1_1), false);
             return CLIENT_H1;
         }
         // OkHttp 3.x 的 protocols() 强制要求列表里有 http/1.1 或 h2_prior_knowledge，
         // 单独传 [HTTP_2] 会抛 IllegalArgumentException。
         // 所以「探测 H2」不能靠限制协议，只能在拿到响应后检查协商结果（见 fetch 里的 PROTO_H2 分支）。
+        if (insecure) {
+            if (CLIENT_H2_INSECURE == null) {
+                CLIENT_H2_INSECURE = build(
+                        Arrays.asList(Protocol.HTTP_1_1, Protocol.HTTP_2), true);
+            }
+            return CLIENT_H2_INSECURE;
+        }
         if (CLIENT_H2 == null) {
-            CLIENT_H2 = build(Arrays.asList(Protocol.HTTP_1_1, Protocol.HTTP_2));
+            CLIENT_H2 = build(Arrays.asList(Protocol.HTTP_1_1, Protocol.HTTP_2), false);
         }
         return CLIENT_H2;
     }
 
-    private static OkHttpClient build(List<Protocol> ps) {
-        return new OkHttpClient.Builder()
+    private static OkHttpClient build(List<Protocol> ps, boolean insecure) {
+        OkHttpClient.Builder b = new OkHttpClient.Builder()
                 .protocols(ps)
                 .followRedirects(false)
                 .followSslRedirects(false)
                 .connectTimeout(15, TimeUnit.SECONDS)
                 .readTimeout(30, TimeUnit.SECONDS)
                 .writeTimeout(15, TimeUnit.SECONDS)
-                .retryOnConnectionFailure(true)
-                .build();
+                .retryOnConnectionFailure(true);
+        if (insecure) {
+            // 只对用户在弹窗里点过「继续」的站点生效，且仅存在于本次进程内
+            try {
+                SSLContext ctx = SSLContext.getInstance("TLS");
+                ctx.init(null, new TrustManager[]{TRUST_ALL}, new SecureRandom());
+                b.sslSocketFactory(ctx.getSocketFactory(), TRUST_ALL);
+                b.hostnameVerifier(new HostnameVerifier() {
+                    public boolean verify(String h, SSLSession s) { return true; }
+                });
+            } catch (Throwable ignored) { }
+        }
+        return b.build();
+    }
+
+    private static final X509TrustManager TRUST_ALL = new X509TrustManager() {
+        public void checkClientTrusted(X509Certificate[] chain, String authType) { }
+        public void checkServerTrusted(X509Certificate[] chain, String authType) { }
+        public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
+    };
+
+    /** host:port，证书例外按端口区分，避免把整台机器上所有服务都放开 */
+    private static String hostKey(HttpUrl u) {
+        return u.host() + ":" + u.port();
+    }
+
+    /** 判断异常链里是不是证书问题，用来决定要不要弹「继续访问」 */
+    private static boolean isSslError(Throwable t) {
+        Throwable c = t;
+        for (int i = 0; i < 8 && c != null; i++) {
+            String n = c.getClass().getName();
+            if (n.contains("SSL") || n.contains("Cert") || n.contains("Trust")) return true;
+            c = c.getCause();
+        }
+        return false;
     }
 
     public static String dump(Map<String, String> h) {
@@ -121,7 +177,8 @@ public class Replay {
         try {
             // 必须放在 try 里：协议配置非法时 client() 会抛异常，
             // 一旦漏到 shouldInterceptRequest 外面就是未捕获异常，整个进程会被杀掉。
-            OkHttpClient client = client(protoChoice);
+            boolean insecure = store.insecureHosts.contains(hostKey(current));
+            OkHttpClient client = client(protoChoice, insecure);
 
             for (int hop = 0; hop <= MAX_HOPS; hop++) {
                 Request.Builder rb = new Request.Builder().url(current).get();
@@ -254,6 +311,11 @@ public class Replay {
             rec.cost = System.currentTimeMillis() - t0;
             rec.chain = chain.toString();
             rec.responseHeaders = "请求失败：" + t;
+            if (isSslError(t)) {
+                // 这里只标记，不弹窗：返回 null 后 WebView 会自己重试，
+                // 由 onReceivedSslError 统一弹一次，否则会出现两个对话框
+                rec.note = "TLS 证书不受信任";
+            }
             store.addRecord(rec);
         }
         return null;
