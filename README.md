@@ -170,3 +170,7 @@ build.sh                        一条命令出 APK
 4. 地址栏导航后没释放焦点，焦点仍在 `EditText` 上
 
 对应改法：`windowSoftInputMode="adjustResize"`；`onConfigurationChanged` 只在高度真变化时重设；加 `OnGlobalLayoutListener` 监听键盘，弹出时收起面板、收起后恢复；`go()` 后 `clearFocus()` + 收起输入法。
+
+### 拾取模式不该弹键盘
+
+输入框被点过之后，`document.activeElement` 仍然是它；拾取模式拦截了 `click`，浏览器默认的「点别处让输入框失焦」也就没发生，于是输入法随时可能再弹出来。修法是进入拾取模式和每次 `touchstart` 时都主动 `document.activeElement.blur()`，原生侧再补一次 `hideSoftInputFromWindow`。

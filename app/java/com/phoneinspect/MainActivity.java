@@ -114,6 +114,7 @@ public class MainActivity extends Activity {
             + "zIndex:cs.zIndex,overflow:cs.overflow,opacity:cs.opacity};"
             + "PI.element(JSON.stringify(o));}"
             + "document.addEventListener('touchstart',function(e){if(!window.__PI_PICK)return;"
+            + "try{var ae=document.activeElement;if(ae&&ae.blur)ae.blur();}catch(x){}"
             + "var t=e.touches[0];sx=t.clientX;sy=t.clientY;moved=false;},true);"
             + "document.addEventListener('touchmove',function(e){if(!window.__PI_PICK)return;"
             + "var t=e.touches[0];if(Math.abs(t.clientX-sx)>10||Math.abs(t.clientY-sy)>10)moved=true;},true);"
@@ -126,6 +127,7 @@ public class MainActivity extends Activity {
             + "window.addEventListener('resize',function(){draw();},true);"
             + "window.__PI_PICK=false;"
             + "window.__PI_SETPICK=function(on){window.__PI_PICK=!!on;"
+            + "if(on){try{var ae=document.activeElement;if(ae&&ae.blur)ae.blur();}catch(x){}}"
             + "if(!on&&ov)ov.style.display='none';};"
             + "window.__PI_DOM=function(){var s='';"
             + "try{s=document.documentElement.outerHTML||'';}catch(e){s='';}"
@@ -1049,10 +1051,22 @@ public class MainActivity extends Activity {
 
     private void applyPick() {
         if (web != null) {
+            if (pickOn) hideWebKeyboard();
             web.evaluateJavascript("window.__PI_SETPICK&&window.__PI_SETPICK("
                     + (pickOn ? "true" : "false") + ");", null);
         }
         updatePickBtn();
+    }
+
+    /** 拾取模式不该弹键盘：除了 JS 侧 blur，原生也主动收一次 */
+    private void hideWebKeyboard() {
+        try {
+            InputMethodManager imm = (InputMethodManager)
+                    getSystemService(Context.INPUT_METHOD_SERVICE);
+            if (imm != null && web != null) {
+                imm.hideSoftInputFromWindow(web.getWindowToken(), 0);
+            }
+        } catch (Throwable ignored) { }
     }
 
     private void updatePickBtn() {
