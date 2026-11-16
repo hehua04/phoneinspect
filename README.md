@@ -157,3 +157,16 @@ libs/
 bootstrap.sh                    下载 SDK 组件
 build.sh                        一条命令出 APK
 ```
+
+## 页面里的输入框拿不到键盘（已在 1.3.5 修复）
+
+症状：点页面里的搜索框，键盘弹一下就收，打不出字。
+
+成因是本 App 自己的三处设置叠在一起：
+
+1. `configChanges` 里声明了 `keyboardHidden`，键盘弹出会走 `onConfigurationChanged`，而那里无条件 `panel.setLayoutParams(...)`，多触发一次 relayout
+2. 没声明 `windowSoftInputMode`，默认 `adjustUnspecified`，窗口按平移处理，和 WebView 自己的「滚动到输入框」互相打架
+3. 面板是固定 40% 高度，窗口因键盘变矮后 WebView 被挤扁
+4. 地址栏导航后没释放焦点，焦点仍在 `EditText` 上
+
+对应改法：`windowSoftInputMode="adjustResize"`；`onConfigurationChanged` 只在高度真变化时重设；加 `OnGlobalLayoutListener` 监听键盘，弹出时收起面板、收起后恢复；`go()` 后 `clearFocus()` + 收起输入法。

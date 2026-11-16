@@ -5,6 +5,7 @@ import android.content.Context;
 import android.content.pm.PackageInfo;
 import android.content.res.Configuration;
 import android.graphics.Bitmap;
+import android.graphics.Rect;
 import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
@@ -19,7 +20,9 @@ import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewTreeObserver;
 import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputMethodManager;
 import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.ValueCallback;
@@ -184,6 +187,8 @@ public class MainActivity extends Activity {
     private int tab = PanelAdapter.TAB_NET;
     private boolean pickOn = false;
     private boolean srcDom = false;
+    private boolean imeOpen = false;
+    private boolean panelOn = true;
 
     @Override
     protected void onCreate(Bundle b) {
@@ -211,6 +216,7 @@ public class MainActivity extends Activity {
 
         panel = buildPanel();
         root.addView(panel, lp(LinearLayout.LayoutParams.MATCH_PARENT, panelHeight()));
+        setupImeWatcher(root);
 
         store.netListener = new Runnable() {
             public void run() { scheduleRefresh(); }
@@ -483,8 +489,8 @@ public class MainActivity extends Activity {
         tg.setClickable(true);
         tg.setOnClickListener(new View.OnClickListener() {
             public void onClick(View v) {
-                panel.setVisibility(panel.getVisibility() == View.VISIBLE
-                        ? View.GONE : View.VISIBLE);
+                panelOn = !panelOn;
+                applyPanel();
             }
         });
         row.addView(tg);
@@ -937,7 +943,20 @@ public class MainActivity extends Activity {
         if (u.equals(lastGoUrl) && now - lastGoAt < 600) return;
         lastGoUrl = u;
         lastGoAt = now;
+        hideKeyboard();
         web.loadUrl(u);
+    }
+
+    /** 导航后把焦点从地址栏拿走，否则地址栏握着焦点，页面里的输入框拿不到输入法 */
+    private void hideKeyboard() {
+        try {
+            InputMethodManager imm = (InputMethodManager)
+                    getSystemService(Context.INPUT_METHOD_SERVICE);
+            if (imm != null && urlBar != null) {
+                imm.hideSoftInputFromWindow(urlBar.getWindowToken(), 0);
+            }
+            if (urlBar != null) urlBar.clearFocus();
+        } catch (Throwable ignored) { }
     }
 
     private void setMode(int m, boolean toast) {
@@ -1347,12 +1366,38 @@ public class MainActivity extends Activity {
 
     public void onConfigurationChanged(Configuration cfg) {
         super.onConfigurationChanged(cfg);
-        // 声明了 configChanges，Activity 不重建，面板高度得自己跟着屏幕重算
-        if (panel != null) {
-            ViewGroup.LayoutParams p = panel.getLayoutParams();
-            p.height = panelHeight();
+        // 只有面板高度真的变了才重设。键盘弹出/收起也会走到这里（configChanges 里声明了
+        // keyboardHidden），无条件 setLayoutParams 会触发一次多余的 relayout，
+        // 和 WebView 的 IME 处理撞在一起会导致键盘弹起后立刻收起。
+        if (panel == null) return;
+        int h = panelHeight();
+        ViewGroup.LayoutParams p = panel.getLayoutParams();
+        if (p.height != h) {
+            p.height = h;
             panel.setLayoutParams(p);
         }
+    }
+
+    /** 键盘弹出时把面板收起来，给页面留出空间，也避免固定高度的面板把 WebView 挤成 0 */
+    private void setupImeWatcher(final View root) {
+        root.getViewTreeObserver().addOnGlobalLayoutListener(
+                new ViewTreeObserver.OnGlobalLayoutListener() {
+                    public void onGlobalLayout() {
+                        Rect r = new Rect();
+                        root.getWindowVisibleDisplayFrame(r);
+                        int rootH = root.getRootView().getHeight();
+                        boolean open = (rootH - r.height()) > rootH / 4;
+                        if (open != imeOpen) {
+                            imeOpen = open;
+                            applyPanel();
+                        }
+                    }
+                });
+    }
+
+    private void applyPanel() {
+        if (panel == null) return;
+        panel.setVisibility(panelOn && !imeOpen ? View.VISIBLE : View.GONE);
     }
 
     protected void onDestroy() {
