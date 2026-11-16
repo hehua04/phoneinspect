@@ -11,6 +11,22 @@ import android.widget.BaseAdapter;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * 列表数据层。
+ *
+ * 之前 adapter 直接按 position 读 store.records，而 Store.addRecord() 是头插：
+ * 页面加载中每来一个请求，整个列表就下移一行，用户点第 3 行打开的是第 4 条。
+ *
+ * 现在改成分两步：
+ * 1. 每次刷新先取一份快照（reload），渲染和点击都对着同一份快照；
+ * 2. 记录带稳定 id，点击时优先用「被点那一行自己携带的 id」（View tag）反查，
+ *    即使快照刚换过，打开的也一定是用户眼睛看到的那条。
+ *
+ * 后面加导航分隔行 / 搜索筛选时，只需要改 netRows 的构造，渲染层不用动。
+ */
 public class PanelAdapter extends BaseAdapter {
 
     public static final int TAB_NET = 0;
@@ -23,6 +39,10 @@ public class PanelAdapter extends BaseAdapter {
     private final Net.Store store = Net.Store.get();
     private int tab = TAB_NET;
 
+    /** 当前渲染用的快照，position 只对这份列表有效 */
+    private final List<Net.Record> netRows = new ArrayList<Net.Record>();
+    private final List<Net.LogItem> logRows = new ArrayList<Net.LogItem>();
+
     public PanelAdapter(Context c) {
         this.ctx = c;
     }
@@ -32,18 +52,75 @@ public class PanelAdapter extends BaseAdapter {
         notifyDataSetChanged();
     }
 
+    /** 取快照。之后加分隔行 / 过滤都在这里改写 netRows 的构造方式 */
+    public void reload() {
+        if (tab == TAB_NET) {
+            synchronized (store.records) {
+                netRows.clear();
+                netRows.addAll(store.records);
+            }
+        } else if (tab == TAB_LOG) {
+            synchronized (store.logs) {
+                logRows.clear();
+                logRows.addAll(store.logs);
+            }
+        }
+    }
+
+    /** 刷新入口统一在这里重新取快照，避免出现「数据和行数不同步」的帧 */
+    public void notifyDataSetChanged() {
+        reload();
+        super.notifyDataSetChanged();
+    }
+
     public int getCount() {
-        if (tab == TAB_NET) return store.recordCount();
-        if (tab == TAB_LOG) return store.logCount();
+        if (tab == TAB_NET) return netRows.size();
+        if (tab == TAB_LOG) return logRows.size();
         return 0;
     }
 
-    public Object getItem(int p) { return null; }
+    public Object getItem(int p) {
+        if (tab == TAB_NET) {
+            return p >= 0 && p < netRows.size() ? netRows.get(p) : null;
+        }
+        if (tab == TAB_LOG) {
+            return p >= 0 && p < logRows.size() ? logRows.get(p) : null;
+        }
+        return null;
+    }
 
-    public long getItemId(int p) { return p; }
+    public long getItemId(int p) {
+        Object o = getItem(p);
+        if (o instanceof Net.Record) return ((Net.Record) o).id;
+        if (o instanceof Net.LogItem) return ((Net.LogItem) o).id;
+        return -1;
+    }
+
+    public boolean hasStableIds() {
+        return true;
+    }
+
+    /**
+     * 点击时反查：先用行的 tag 里的 id，找不到再退回 position。
+     * 这条路径不依赖「position 与 store.records 的 index 一致」这个曾经不成立的假设。
+     */
+    public Net.Record recordFor(View row, int pos) {
+        long id = 0;
+        if (row != null && row.getTag() instanceof Holder) {
+            id = ((Holder) row.getTag()).recId;
+        }
+        if (id > 0) {
+            for (int i = 0; i < netRows.size(); i++) {
+                if (netRows.get(i).id == id) return netRows.get(i);
+            }
+        }
+        Object o = getItem(pos);
+        return o instanceof Net.Record ? (Net.Record) o : null;
+    }
 
     static class Holder {
         int type;
+        long recId;
         TextView method;
         TextView path;
         TextView status;
@@ -111,11 +188,9 @@ public class PanelAdapter extends BaseAdapter {
     }
 
     private void bindNet(Holder h, int pos) {
-        Net.Record r;
-        synchronized (store.records) {
-            if (pos >= store.records.size()) return;
-            r = store.records.get(pos);
-        }
+        if (pos < 0 || pos >= netRows.size()) return;
+        Net.Record r = netRows.get(pos);
+        h.recId = r.id;
         h.method.setText(r.method);
         h.path.setText(pathOf(r.url));
         h.status.setText(statusText(r.status));
@@ -124,11 +199,9 @@ public class PanelAdapter extends BaseAdapter {
     }
 
     private void bindLog(Holder h, int pos) {
-        Net.LogItem l;
-        synchronized (store.logs) {
-            if (pos >= store.logs.size()) return;
-            l = store.logs.get(pos);
-        }
+        if (pos < 0 || pos >= logRows.size()) return;
+        Net.LogItem l = logRows.get(pos);
+        h.recId = l.id;
         h.text.setText("[" + l.level + "] " + l.msg);
         h.text.setTextColor(logColor(l.level));
     }

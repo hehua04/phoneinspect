@@ -139,7 +139,7 @@ public class MainActivity extends Activity {
             + "if(s.length>MAX){s=s.substring(0,MAX)+'\\n\\n<!-- 已截断，实际 '+total+' 字符 -->';}"
             + "PI.domReset();var SZ=60000;"
             + "for(var i=0;i<s.length;i+=SZ){PI.domChunk(s.substr(i,SZ));}"
-            + "PI.domDone();};"
+            + "PI.domDone(location.href);};"
             + "})();";
 
     private static final String HOME =
@@ -333,14 +333,23 @@ public class MainActivity extends Activity {
         return (int) (getResources().getDisplayMetrics().heightPixels * 0.40f);
     }
 
-    /** 首屏几十个请求会连续触发回调，合并成 200ms 一次全量刷新 */
+    /**
+     * 节流而不是防抖：原来的 removeCallbacks + postDelayed 会被连续流量无限推后，
+     * 页面一直在发请求时列表反而不刷新，看起来像卡死。现在最多 200ms 刷一次。
+     */
     private void scheduleRefresh() {
-        store.main.removeCallbacks(refreshTask);
+        if (refreshPending) return;
+        refreshPending = true;
         store.main.postDelayed(refreshTask, 200);
     }
 
+    private boolean refreshPending = false;
+
     private final Runnable refreshTask = new Runnable() {
-        public void run() { refreshCounts(); }
+        public void run() {
+            refreshPending = false;
+            refreshCounts();
+        }
     };
 
     private View buildBar() {
@@ -582,12 +591,10 @@ public class MainActivity extends Activity {
         netList.setAdapter(netAdapter);
         netList.setOnItemClickListener(new AdapterView.OnItemClickListener() {
             public void onItemClick(AdapterView<?> a, View v, int pos, long id) {
-                Net.Record r;
-                synchronized (store.records) {
-                    if (pos >= store.records.size()) return;
-                    r = store.records.get(pos);
-                }
-                Detail.show(MainActivity.this, r);
+                // 按行自带 id 反查，不用 position 直接索引 store.records：
+                // 加载中新记录头插会使整表下移，按 position 取会打开邻居
+                Net.Record r = netAdapter.recordFor(v, pos);
+                if (r != null) Detail.show(MainActivity.this, r);
             }
         });
         content.addView(netList, full());
@@ -819,6 +826,10 @@ public class MainActivity extends Activity {
 
         public void onPageStarted(WebView v, String u, Bitmap f) {
             resetPick();
+            // 换了文档，上一页拾取到的元素信息一定失效。
+            // 不清掉的话，在新页面上点「元素」会看到上一站的标签和样式（实测过）
+            store.setElement("");
+            if (tab == PanelAdapter.TAB_ELEM) renderElement();
             setUrlText(u);
             inject();
         }
@@ -918,10 +929,11 @@ public class MainActivity extends Activity {
         }
 
         @JavascriptInterface
-        public void domDone() {
+        public void domDone(String href) {
             final String s;
             synchronized (domBuf) { s = domBuf.toString(); }
-            store.setDom(s);
+            // 带上抓取时的地址，源码页才能判断这份 DOM 是不是当前页面的
+            store.setDom(href, s);
             store.main.post(new Runnable() {
                 public void run() {
                     if (tab == PanelAdapter.TAB_SRC && srcDom) srcText.setText(s);
@@ -1193,9 +1205,13 @@ public class MainActivity extends Activity {
             chipDom.setTextColor(dom ? 0xFF0F1115 : C_DIM);
             chipDom.setBackground(round(dom ? C_ACC : 0x00000000, 6));
         }
-        if (dom && (store.domHtml == null || store.domHtml.length() == 0)) {
-            captureDom();
-            return;
+        if (dom) {
+            boolean empty = store.domHtml == null || store.domHtml.length() == 0;
+            // 上一站抓的 DOM 不能再冒充当前页：换站后自动重抓一次
+            if (empty || isForeign(store.domUrl)) {
+                captureDom();
+                return;
+            }
         }
         renderSource();
     }
@@ -1204,20 +1220,58 @@ public class MainActivity extends Activity {
         if (srcText == null) return;
         if (srcDom) {
             String s = store.domHtml;
-            srcText.setText(s == null || s.length() == 0
-                    ? "正在抓取当前 DOM…\n\n"
-                    + "DOM 是 JS 执行后的结果，不含 shadow DOM，input 里的当前输入值"
-                    + "也不会出现在 outerHTML 中。"
-                    : s);
+            if (s == null || s.length() == 0) {
+                srcText.setText("正在抓取当前 DOM…\n\n"
+                        + "DOM 是 JS 执行后的结果，不含 shadow DOM，input 里的当前输入值"
+                        + "也不会出现在 outerHTML 中。");
+            } else {
+                srcText.setText(foreignNote(store.domUrl) + s);
+            }
         } else {
             String s = store.sourceHtml;
-            srcText.setText(s == null || s.length() == 0
-                    ? "还没有拿到原文。\n\n"
-                    + "原文是拦截层从服务器响应里拿到的原始字节，"
-                    + "需要处于「拦截 GET」模式并刷新一次页面。\n\n"
-                    + "它比 DOM 快照更可信：注释、原始缩进、未被 JS 渲染的模板都在。"
-                    : s);
+            if (s == null || s.length() == 0) {
+                srcText.setText("还没有拿到原文。\n\n"
+                        + "原文是拦截层从服务器响应里拿到的原始字节，"
+                        + "需要处于「拦截 GET」模式并刷新一次页面。\n\n"
+                        + "它比 DOM 快照更可信：注释、原始缩进、未被 JS 渲染的模板都在。");
+            } else {
+                srcText.setText(foreignNote(store.sourceUrl) + s);
+            }
         }
+    }
+
+    /** 这份数据抓取时的地址是否已经不属于当前页面（按 host 判断） */
+    private boolean isForeign(String fromUrl) {
+        String a = hostOf(fromUrl);
+        String b = hostOf(web == null ? "" : web.getUrl());
+        return a.length() > 0 && b.length() > 0 && !a.equals(b);
+    }
+
+    /** 不删数据，只在前面加一行来源说明——删了就没法回看上一站的内容了 */
+    private String foreignNote(String fromUrl) {
+        if (!isForeign(fromUrl)) return "";
+        String a = hostOf(fromUrl);
+        String b = hostOf(web == null ? "" : web.getUrl());
+        return "注意：以下内容来自 " + a + "，不属于当前页面 " + b + "\n"
+                + "（页面已跳转，或当前处于「仅记录」模式，没有为新页面重新抓取）\n\n";
+    }
+
+    private static String hostOf(String u) {
+        if (u == null) return "";
+        int i = u.indexOf("://");
+        if (i < 0) return "";
+        String s = u.substring(i + 3);
+        int e = s.length();
+        for (int k = 0; k < s.length(); k++) {
+            char c = s.charAt(k);
+            if (c == '/' || c == '?' || c == '#') { e = k; break; }
+        }
+        s = s.substring(0, e);
+        int at = s.lastIndexOf('@');
+        if (at >= 0) s = s.substring(at + 1);
+        int colon = s.lastIndexOf(':');
+        if (colon >= 0 && s.indexOf(']') < colon) s = s.substring(0, colon);
+        return s.toLowerCase();
     }
 
     private void captureDom() {

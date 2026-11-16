@@ -17,6 +17,8 @@ public class Net {
     public static final int PROTO_H2 = 2;
 
     public static class Record {
+        /** 稳定 id，由 Store 分配；列表点击靠它反查，不受头插影响 */
+        public long id = 0;
         public String method = "";
         public String url = "";
         public String requestHeaders = "";
@@ -35,6 +37,7 @@ public class Net {
     }
 
     public static class LogItem {
+        public long id = 0;
         public String level = "log";
         public String msg = "";
         public long time = System.currentTimeMillis();
@@ -55,8 +58,12 @@ public class Net {
         public Runnable netListener;
         public Runnable logListener;
 
+        private long recordSeq = 0;
+        private long logSeq = 0;
+
         public void addRecord(final Record r) {
             synchronized (records) {
+                if (r.id == 0) r.id = ++recordSeq;
                 records.add(0, r);
                 while (records.size() > 400) records.remove(records.size() - 1);
             }
@@ -69,6 +76,7 @@ public class Net {
 
         public void addLog(final LogItem l) {
             synchronized (logs) {
+                if (l.id == 0) l.id = ++logSeq;
                 logs.add(0, l);
                 while (logs.size() > 500) logs.remove(logs.size() - 1);
             }
@@ -94,13 +102,16 @@ public class Net {
         public volatile String elementInfo = "";
         /** document.documentElement.outerHTML 快照 */
         public volatile String domHtml = "";
+        /** DOM 快照抓取时所在的地址，用来判断它是不是当前页面的 */
+        public volatile String domUrl = "";
 
         public void setSource(String url, String html) {
             sourceUrl = url == null ? "" : url;
             sourceHtml = html == null ? "" : html;
         }
 
-        public void setDom(String html) {
+        public void setDom(String url, String html) {
+            domUrl = url == null ? "" : url;
             domHtml = html == null ? "" : html;
         }
 
