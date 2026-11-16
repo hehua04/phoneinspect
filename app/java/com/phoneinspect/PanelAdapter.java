@@ -103,8 +103,13 @@ public class PanelAdapter extends BaseAdapter {
         row.navId = navId;
         // 分隔行用负数 id，和记录的 id 不冲突（记录 id 从 1 开始）
         row.id = -1000000L * (navId + 1) - 1;
-        String where = pageUrl == null || pageUrl.length() == 0 ? "(未知页面)" : pageUrl;
-        row.title = (navId <= 0 ? "切换前" : "#" + navId) + "  " + where;
+        String where = pageUrl == null ? "" : pageUrl;
+        if (navId <= 0) {
+            // 内置主页是 data: 页面，不经过拦截层，所以没有导航编号
+            row.title = "未归属页面" + (where.length() > 0 ? "  " + where : "");
+        } else {
+            row.title = "#" + navId + "  " + (where.length() > 0 ? where : "(页面地址未知)");
+        }
         return row;
     }
 

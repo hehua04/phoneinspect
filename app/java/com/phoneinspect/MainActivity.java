@@ -195,6 +195,7 @@ public class MainActivity extends Activity {
     private boolean srcDom = false;
     private boolean imeOpen = false;
     private boolean panelOn = true;
+    private View rootView;
 
     @Override
     protected void onCreate(Bundle b) {
@@ -211,6 +212,7 @@ public class MainActivity extends Activity {
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(C_BG);
         setContentView(root);
+        rootView = root;
 
         root.addView(buildBar(), lp(LinearLayout.LayoutParams.MATCH_PARENT, dp(52)));
         root.addView(buildModeRow(), lp(LinearLayout.LayoutParams.MATCH_PARENT, dp(42)));
@@ -393,6 +395,13 @@ public class MainActivity extends Activity {
             public boolean onEditorAction(TextView v, int id, KeyEvent e) {
                 go(urlBar.getText().toString());
                 return true;
+            }
+        });
+        // 键盘已经开着时（比如刚在控制台打过 JS）再点地址栏，imeOpen 不会变化，
+        // 收不到 onGlobalLayout 的跳变，所以要在这里单独通知一次
+        urlBar.setOnFocusChangeListener(new View.OnFocusChangeListener() {
+            public void onFocusChange(View v, boolean has) {
+                if (has && imeOpen) applyPanel();
             }
         });
 
@@ -1581,14 +1590,49 @@ public class MainActivity extends Activity {
                         if (open != imeOpen) {
                             imeOpen = open;
                             applyPanel();
+                        } else if (open) {
+                            // 键盘一直开着时，焦点可能从地址栏换到控制台输入框，
+                            // 每帧校正一次底边（padding 没变就什么都不做）
+                            fitAboveKeyboard();
                         }
                     }
                 });
     }
 
+    /**
+     * 1.3.5 为了让页面输入框不被面板挤扁，加了「键盘一弹就收起面板」。
+     * 但控制台的输入框本身就在面板里，收起面板等于把要输入的那一行藏起来。
+     * 现在按焦点来源分开处理：
+     * - 焦点在面板里（控制台执行 JS）→ 面板保留，把内容顶到键盘上沿；
+     * - 焦点在页面或地址栏 → 仍按原逻辑收起面板，给 WebView 让出空间。
+     */
     private void applyPanel() {
         if (panel == null) return;
-        panel.setVisibility(panelOn && !imeOpen ? View.VISIBLE : View.GONE);
+        boolean typingInPanel = imeOpen && evalInput != null && evalInput.hasFocus();
+        boolean show = panelOn && (!imeOpen || typingInPanel);
+        panel.setVisibility(show ? View.VISIBLE : View.GONE);
+        fitAboveKeyboard();
+    }
+
+    /**
+     * 键盘盖住多少就往上顶多少。
+     * 窗口若已被 adjustResize 缩过，overlap 天然是 0，不会顶两次。
+     */
+    private void fitAboveKeyboard() {
+        if (rootView == null) return;
+        if (!imeOpen || panel == null || panel.getVisibility() != View.VISIBLE) {
+            if (rootView.getPaddingBottom() != 0) rootView.setPadding(0, 0, 0, 0);
+            return;
+        }
+        Rect r = new Rect();
+        rootView.getWindowVisibleDisplayFrame(r);
+        int[] loc = new int[2];
+        rootView.getLocationOnScreen(loc);
+        int overlap = loc[1] + rootView.getHeight() - r.bottom;
+        if (overlap < 0) overlap = 0;
+        if (rootView.getPaddingBottom() != overlap) {
+            rootView.setPadding(0, 0, 0, overlap);
+        }
     }
 
     protected void onDestroy() {
