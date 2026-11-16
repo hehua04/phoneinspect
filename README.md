@@ -87,8 +87,11 @@ versionName=1.1.0
 不需要 Gradle，也不需要 Android Studio。工具链是 `aapt2 + javac + d8 + zipalign + apksigner`。
 
 ```bash
-bash build.sh        # 产物在根目录 PhoneInspect.apk
+bash build.sh        # 只构建，产物在根目录 PhoneInspect.apk
+bash deploy.sh       # 构建 + 校验 + 安装到设备（推荐）
 ```
+
+`deploy.sh` 存在的理由：`bash build.sh | tail -3 && adb install ...` 这种写法里，管道的退出码是 `tail` 的，**构建失败也会继续往下走**，于是把仓库里上一次残留的 APK 装到手机上，看起来像「先装了旧包再装新包」。`deploy.sh` 会检查构建退出码、比对 APK 与 `version.properties` 的版本、装完再回读设备上的 versionCode，任一步不符就中止。
 
 首次运行会自动调用 `bootstrap.sh` 下载 build-tools 35 与 platform 35（约 120MB）到 `sdk/`。这一步是**从 Google 官方源下载 SDK 组件**，和安装 Android Studio 里勾选的是同一批文件。
 
