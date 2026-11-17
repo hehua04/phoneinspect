@@ -157,7 +157,7 @@ WebView 拿到"看起来像正常响应"的内容并渲染
 - **h2 只是"能连"，不是"等同浏览器"**。`shouldInterceptRequest` 是每请求一次阻塞调用，单例 OkHttpClient 的连接池能复用连接、多路复用流，但 h2 优先级、流依赖、103 Early Hints 这些调度行为拿不回来。
 - **协议只管被拦截的请求**。POST、WebSocket、Service Worker 不走这里，仍然由 WebView 自己决定协议。
 - **拿不到 POST 请求体**。`WebResourceRequest` 不提供 body，所以非 GET 请求只记录 URL 和请求头、不重发。
-- **超过 4MB 或流媒体不重放**。标为「跳过重放」并返回 `null` 交给 WebView，这类资源实际会下载两次。
+- **超大与流媒体只透传、不留内容**。超过 4MB、或 `video/` `audio/`/SSE 这类流，直接交给 WebView 边下边传，面板只保留开头 8KB——服务端只收到一次请求，但你看不到完整响应体。
 - **主文档的 3xx 不做重放**。能看到状态码和响应头，但响应体由 WebView 重新请求获取，这类跳转实际会发两次请求。
 - **iframe 里的 console 收不到**。`evaluateJavascript` 只作用于主 frame，跨域 iframe 的日志拿不到。
 - **跨域 iframe 里的元素选不进去**。同源 iframe 可以，跨域只能选到 iframe 这一层。
@@ -165,8 +165,19 @@ WebView 拿到"看起来像正常响应"的内容并渲染
 - **源码原文依赖拦截模式**。需要处于「拦截 GET」并刷新一次页面，否则「原文」视图是空的。
 - **JS 桥 `PI` 对所有页面开放**。恶意页面理论上能刷日志（有 500 条上限，风险很低）。只在调试自己的站点时用。
 - **导出写文件不写剪贴板**。记录含 `Set-Cookie`，剪贴板对其它 App 可读。文件落在 `Android/data/com.phoneinspect/files/export/`。
-- 每个 GET 多一次往返，请求多的页面会变慢。
+- **每个 GET 多一次往返**。实测 24 张同域图（每张 300ms 延迟）拦截模式 2.0s、原生 3.0s；延迟极高的网络下仍会比原生慢一点。
 - 记录只存在内存里，切后台被回收就没了，最多保留 400 条。
+
+### 这些不打算做
+
+公开 issue 之前先看这里，省得互相等：
+
+- **HTTP/3 / QUIC**。OkHttp 从来没正式支持，要看只能换 Cronet（+10MB）。
+- **POST 请求体**。`WebResourceRequest` 根本不提供，改不了。
+- **Service Worker 注册与 CacheStorage 清理**。「清缓存」只清 HTTP 缓存和 DOM Storage，SW 需要另一套 API，收益低于复杂度。
+- **macOS 构建脚本**。`bootstrap.sh` 只写了 Windows/Linux 两条分支，mac 用户可以手动放 SDK。
+- **HAR 导出**。现在只有 txt。真要 HAR 得处理 base64 body 和 `_initiator` 字段，且大响应落盘会吃掉手机存储。
+- **把记录持久化到磁盘**。会顺带把 Cookie 写进文件，风险大于收益。
 
 ## 目录
 
@@ -209,20 +220,3 @@ docs/                           README 用截图
 ## 许可
 
 MIT，见 [LICENSE](LICENSE)。内置依赖 OkHttp 与 Okio，均为 Apache-2.0，详见 [THIRD-PARTY.md](THIRD-PARTY.md)。
-
-## 实现笔记：键盘为什么会跟页面打架
-
-症状：点页面里的搜索框，键盘弹一下就收，打不出字。
-
-成因是本 App 自己的三处设置叠在一起：
-
-1. `configChanges` 里声明了 `keyboardHidden`，键盘弹出会走 `onConfigurationChanged`，而那里无条件 `panel.setLayoutParams(...)`，多触发一次 relayout
-2. 没声明 `windowSoftInputMode`，默认 `adjustUnspecified`，窗口按平移处理，和 WebView 自己的「滚动到输入框」互相打架
-3. 面板是固定 40% 高度，窗口因键盘变矮后 WebView 被挤扁
-4. 地址栏导航后没释放焦点，焦点仍在 `EditText` 上
-
-对应改法：`windowSoftInputMode="adjustResize"`；`onConfigurationChanged` 只在高度真变化时重设；加 `OnGlobalLayoutListener` 监听键盘，弹出时收起面板、收起后恢复；`go()` 后 `clearFocus()` + 收起输入法。
-
-### 拾取模式不该弹键盘
-
-输入框被点过之后，`document.activeElement` 仍然是它；拾取模式拦截了 `click`，浏览器默认的「点别处让输入框失焦」也就没发生，于是输入法随时可能再弹出来。修法是进入拾取模式和每次 `touchstart` 时都主动 `document.activeElement.blur()`，原生侧再补一次 `hideSoftInputFromWindow`。
