@@ -1,0 +1,37 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: 构建 APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # SDK 有 120MB，缓存下来第二次起就不用再下载
+      - name: 缓存 Android SDK
+        uses: actions/cache@v4
+        with:
+          path: |
+            sdk
+            sdk_dl
+          key: android-sdk-35.0.0-v1
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: 构建
+        run: bash build.sh
+
+      - name: 上传 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: PhoneInspect-apk
+          path: PhoneInspect.apk
+          if-no-files-found: error

@@ -1,6 +1,28 @@
 # PhoneInspect
 
-不接电脑、不用 USB，直接在 Android 手机上查看网页每个请求的**完整响应头** —— 包括 JS 层永远读不到的 `Set-Cookie`、重定向链和真实状态码。
+[![build](https://github.com/hehua04/phoneinspect/actions/workflows/build.yml/badge.svg)](https://github.com/hehua04/phoneinspect/actions/workflows/build.yml)
+
+**在手机上直接看每个请求的完整响应头和真实状态码** —— 不接电脑、不用 USB。包括 JS 层永远读不到的 `Set-Cookie`、重定向链，以及 301/302 本身。
+
+**EN** · An on-device network inspector for Android WebView. Requests are replayed through its own HTTP stack, so you see real status codes, redirect chains and `Set-Cookie` — things page-level JS (Eruda, vConsole) can never read. No PC, no USB, no Gradle: `bash build.sh` produces a ~250KB APK.
+
+<p align="center">
+  <img src="docs/shot-list.png" width="31%" alt="请求列表：绿色已接管、橙色已探测未接管、灰色未发送、红色失败，按页面分段" />
+  <img src="docs/shot-filter.png" width="31%" alt="只看失败，tab 上显示 1/7" />
+  <img src="docs/shot-detail.png" width="31%" alt="详情页把这条请求到底发生了什么写清楚" />
+</p>
+
+> **只用于调试你自己拥有、或已获授权调试的站点。** 所有数据只在本机：没有账号、没有上传、没有统计、没有第三方 SDK。
+
+## 快速开始
+
+1. 下载 `PhoneInspect.apk` 传到手机安装（需允许未知来源），或 `adb install -r PhoneInspect.apk`
+2. 打开 App，在顶部输入网址 —— 页面就在 App 内打开
+3. 底部面板五块：网络 / 控制台 / 元素 / 源码 / 信息
+
+仓库里的包用本机 debug key 签名。**你自己重新构建的包签名不同，无法覆盖安装**，需要先卸载（会丢数据）。
+
+minSdk 26（Android 8+），无原生库，不分 32/64 位。
 
 ## 为什么不用 Eruda / vConsole
 
@@ -60,16 +82,6 @@ App 会接管未捕获异常，把堆栈写到 `Android/data/com.phoneinspect/fi
 adb logcat -b crash -d          # 只看崩溃缓冲区
 adb logcat AndroidRuntime:E *:S # 只看异常
 ```
-
-## 安装
-
-下载仓库里的 `PhoneInspect.apk`，传到手机点击安装（需允许未知来源）；或
-
-```bash
-adb install -r PhoneInspect.apk
-```
-
-minSdk 26（Android 8+），无原生库，不分 32/64 位。
 
 ## 版本
 
@@ -173,24 +185,8 @@ libs/
   okio-1.17.2.jar               OkHttp 依赖
 bootstrap.sh                    下载 SDK 组件
 build.sh                        一条命令出 APK
+docs/                           README 用截图
 ```
-
-## 页面里的输入框拿不到键盘（已在 1.3.5 修复）
-
-症状：点页面里的搜索框，键盘弹一下就收，打不出字。
-
-成因是本 App 自己的三处设置叠在一起：
-
-1. `configChanges` 里声明了 `keyboardHidden`，键盘弹出会走 `onConfigurationChanged`，而那里无条件 `panel.setLayoutParams(...)`，多触发一次 relayout
-2. 没声明 `windowSoftInputMode`，默认 `adjustUnspecified`，窗口按平移处理，和 WebView 自己的「滚动到输入框」互相打架
-3. 面板是固定 40% 高度，窗口因键盘变矮后 WebView 被挤扁
-4. 地址栏导航后没释放焦点，焦点仍在 `EditText` 上
-
-对应改法：`windowSoftInputMode="adjustResize"`；`onConfigurationChanged` 只在高度真变化时重设；加 `OnGlobalLayoutListener` 监听键盘，弹出时收起面板、收起后恢复；`go()` 后 `clearFocus()` + 收起输入法。
-
-### 拾取模式不该弹键盘
-
-输入框被点过之后，`document.activeElement` 仍然是它；拾取模式拦截了 `click`，浏览器默认的「点别处让输入框失焦」也就没发生，于是输入法随时可能再弹出来。修法是进入拾取模式和每次 `touchstart` 时都主动 `document.activeElement.blur()`，原生侧再补一次 `hideSoftInputFromWindow`。
 
 ## 自签名证书
 
@@ -213,3 +209,20 @@ build.sh                        一条命令出 APK
 ## 许可
 
 MIT，见 [LICENSE](LICENSE)。内置依赖 OkHttp 与 Okio，均为 Apache-2.0，详见 [THIRD-PARTY.md](THIRD-PARTY.md)。
+
+## 实现笔记：键盘为什么会跟页面打架
+
+症状：点页面里的搜索框，键盘弹一下就收，打不出字。
+
+成因是本 App 自己的三处设置叠在一起：
+
+1. `configChanges` 里声明了 `keyboardHidden`，键盘弹出会走 `onConfigurationChanged`，而那里无条件 `panel.setLayoutParams(...)`，多触发一次 relayout
+2. 没声明 `windowSoftInputMode`，默认 `adjustUnspecified`，窗口按平移处理，和 WebView 自己的「滚动到输入框」互相打架
+3. 面板是固定 40% 高度，窗口因键盘变矮后 WebView 被挤扁
+4. 地址栏导航后没释放焦点，焦点仍在 `EditText` 上
+
+对应改法：`windowSoftInputMode="adjustResize"`；`onConfigurationChanged` 只在高度真变化时重设；加 `OnGlobalLayoutListener` 监听键盘，弹出时收起面板、收起后恢复；`go()` 后 `clearFocus()` + 收起输入法。
+
+### 拾取模式不该弹键盘
+
+输入框被点过之后，`document.activeElement` 仍然是它；拾取模式拦截了 `click`，浏览器默认的「点别处让输入框失焦」也就没发生，于是输入法随时可能再弹出来。修法是进入拾取模式和每次 `touchstart` 时都主动 `document.activeElement.blur()`，原生侧再补一次 `hideSoftInputFromWindow`。
