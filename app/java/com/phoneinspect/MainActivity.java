@@ -37,6 +37,7 @@ import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.webkit.WebStorage;
 import android.widget.AdapterView;
 import android.widget.EditText;
 import android.widget.FrameLayout;
@@ -878,14 +879,116 @@ public class MainActivity extends Activity {
     private ScrollView buildInfoView() {
         ScrollView sc = new ScrollView(this);
         sc.setBackgroundColor(C_BG);
+
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+
         infoBody = new TextView(this);
         infoBody.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
         infoBody.setTextColor(0xFFB4BAC4);
         infoBody.setPadding(dp(14), dp(14), dp(14), dp(14));
         infoBody.setLineSpacing(dp(4), 1f);
         infoBody.setTextIsSelectable(true);
-        sc.addView(infoBody);
+        box.addView(infoBody);
+
+        box.addView(buildCacheRow());
+        sc.addView(box);
         return sc;
+    }
+
+    /**
+     * 浏览器自己的缓存和拦截层的记录是两套东西：
+     * 301 默认被永久缓存，服务端改了以后浏览器仍然照着老 Location 跳，
+     * 这种情况下网络面板里能看到正确的 301（那是重放拿到的），页面却还是跑到旧地址。
+     */
+    private LinearLayout buildCacheRow() {
+        LinearLayout r = new LinearLayout(this);
+        r.setOrientation(LinearLayout.VERTICAL);
+        r.setPadding(dp(14), 0, dp(14), dp(18));
+
+        TextView hint = new TextView(this);
+        hint.setText("浏览器缓存\n"
+                + "上面的记录来自拦截层重放，绕过了缓存；页面实际走的是 WebView 自己的缓存。\n"
+                + "301 默认会被永久缓存——服务端改了跳转，浏览器仍可能按老地址跳。");
+        hint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f);
+        hint.setTextColor(0xFF7C8593);
+        hint.setLineSpacing(dp(4), 1f);
+        hint.setPadding(0, dp(6), 0, dp(10));
+        r.addView(hint);
+
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+
+        TextView c1 = bigBtn("清 HTTP 缓存");
+        c1.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) { confirmClear(false); }
+        });
+        row.addView(c1, new LinearLayout.LayoutParams(0, dp(38), 1f));
+
+        TextView c2 = bigBtn("清缓存 + Cookie");
+        c2.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) { confirmClear(true); }
+        });
+        LinearLayout.LayoutParams lp2 = new LinearLayout.LayoutParams(0, dp(38), 1f);
+        lp2.leftMargin = dp(8);
+        row.addView(c2, lp2);
+
+        r.addView(row);
+        return r;
+    }
+
+    private TextView bigBtn(String s) {
+        TextView t = new TextView(this);
+        t.setText(s);
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
+        t.setGravity(Gravity.CENTER);
+        t.setTextColor(C_TEXT);
+        t.setBackground(round(0xFF232830, 8));
+        t.setClickable(true);
+        return t;
+    }
+
+    private void confirmClear(final boolean withCookies) {
+        String msg = withCookies
+                ? "会清掉 HTTP 缓存、Cookie、localStorage 和 IndexedDB。\n\n"
+                + "代价：所有站点的登录态会丢失。"
+                : "只清 HTTP 缓存（含 301 跳转记录），登录态保留。";
+        new AlertDialog.Builder(this)
+                .setTitle("清缓存")
+                .setMessage(msg)
+                .setPositiveButton("清", new DialogInterface.OnClickListener() {
+                    public void onClick(DialogInterface d, int w) { doClear(withCookies); }
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void doClear(boolean withCookies) {
+        StringBuilder done = new StringBuilder();
+        try {
+            if (web != null) {
+                web.clearCache(true);
+                done.append("HTTP 缓存");
+            }
+        } catch (Throwable ignored) { }
+        try {
+            WebStorage.getInstance().deleteAllData();
+            done.append(done.length() > 0 ? "、" : "").append("DOM Storage");
+        } catch (Throwable ignored) { }
+        if (withCookies) {
+            try {
+                CookieManager cm = CookieManager.getInstance();
+                cm.removeAllCookies(null);
+                cm.flush();
+                done.append("、Cookie");
+            } catch (Throwable ignored) { }
+        }
+        Toast.makeText(this, "已清除：" + done + "，正在重新加载", Toast.LENGTH_SHORT).show();
+        // 让用户马上看到效果：清完按一次刷新
+        if (web != null) {
+            String u = web.getUrl();
+            if (u != null && !u.startsWith("data:") && !u.startsWith("about:")) web.reload();
+        }
     }
 
     private TextView monoText() {
