@@ -5,8 +5,10 @@ import android.webkit.WebResourceResponse;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.SequenceInputStream;
 import java.nio.charset.Charset;
 import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
@@ -22,6 +24,7 @@ import javax.net.ssl.SSLSession;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509TrustManager;
 
+import okhttp3.Dispatcher;
 import okhttp3.Headers;
 import okhttp3.HttpUrl;
 import okhttp3.OkHttpClient;
@@ -41,6 +44,9 @@ public class Replay {
     private static final int MAX_BODY = 4 * 1024 * 1024;
     private static final int PREVIEW = 6000;
     private static final int SNIFF_BYTES = 8192;
+    /** 流式交付时留给面板的开头字节数 */
+    private static final int PREVIEW_BYTES = 8192;
+    private static final byte[] EMPTY = new byte[0];
 
     private static final Map<String, String> BY_EXT = new HashMap<String, String>();
 
@@ -108,7 +114,15 @@ public class Replay {
     }
 
     private static OkHttpClient build(List<Protocol> ps, boolean insecure) {
+        // OkHttp 默认 maxRequestsPerHost = 5。WebView 原生是几十路并发，
+        // 5 路 + 每次读完整个 body 才交给 WebView，等于把并行下载改成串行，
+        // 同域图片多的页面会肉眼可见地变慢。
+        Dispatcher d = new Dispatcher();
+        d.setMaxRequests(64);
+        d.setMaxRequestsPerHost(6);
+
         OkHttpClient.Builder b = new OkHttpClient.Builder()
+                .dispatcher(d)
                 .protocols(ps)
                 .followRedirects(false)
                 .followSslRedirects(false)
@@ -200,6 +214,7 @@ public class Replay {
                 if (ck != null && ck.length() > 0) rb.header("Cookie", ck);
 
                 Response resp = client.newCall(rb.build()).execute();
+                boolean handedOff = false;   // 流式交付后，响应体归 WebView 负责关闭
                 try {
                     int code = resp.code();
                     String ct = resp.header("Content-Type");
@@ -251,29 +266,27 @@ public class Replay {
                     ResponseBody body = resp.body();
                     long declared = body == null ? -1 : body.contentLength();
 
+                    // 流媒体 / 超大响应不再"读一截再丢弃"，改成边下边传：
+                    // 服务端只会收到一次请求，内存也不会被几十兆占住。
                     if (isStream(ct) || declared > MAX_BODY) {
-                        rec.kind = Net.Record.KIND_SKIPPED_AFTER;
-                        rec.note = isStream(ct)
-                                ? "流媒体，跳过重放"
-                                : "超过 " + (MAX_BODY / 1024 / 1024) + "MB，跳过重放";
-                        rec.responseHeaders = rec.responseHeaders
-                                + "\n\n(" + rec.note + "，已交由 WebView 直接加载，该请求会再发一次)";
-                        rec.finalUrl = current.toString();
-                        rec.cost = System.currentTimeMillis() - t0;
-                        store.addRecord(rec);
-                        return null;
+                        handedOff = true;
+                        boolean stream = isStream(ct);
+                        InputStream bin = body == null
+                                ? new ByteArrayInputStream(EMPTY) : body.byteStream();
+                        return handOff(bin, resp, rec, current, ct, store, t0,
+                                stream ? "流式透传（内容不进面板）"
+                                        : "边下边传（超过 " + (MAX_BODY / 1024 / 1024) + "MB）");
                     }
 
-                    byte[] data = readCapped(body);
+                    ByteArrayOutputStream partial = new ByteArrayOutputStream();
+                    byte[] data = readCapped(body, partial);
                     if (data == null) {
-                        rec.kind = Net.Record.KIND_SKIPPED_AFTER;
-                        rec.note = "超过 " + (MAX_BODY / 1024 / 1024) + "MB，跳过重放";
-                        rec.responseHeaders = rec.responseHeaders
-                                + "\n\n(" + rec.note + "，已交由 WebView 直接加载，该请求会再发一次)";
-                        rec.finalUrl = current.toString();
-                        rec.cost = System.currentTimeMillis() - t0;
-                        store.addRecord(rec);
-                        return null;
+                        // 长度未知（chunked）但实际超过上限：已读到的部分 + 剩余字节接上去继续传
+                        handedOff = true;
+                        InputStream joined = new SequenceInputStream(
+                                new ByteArrayInputStream(partial.toByteArray()), body.byteStream());
+                        return handOff(joined, resp, rec, current, ct, store, t0,
+                                "边下边传（长度未知且超过 " + (MAX_BODY / 1024 / 1024) + "MB）");
                     }
 
                     rec.size = data.length;
@@ -308,12 +321,17 @@ public class Replay {
                     store.addRecord(rec);
                     return out;
                 } finally {
-                    resp.close();
+                    if (!handedOff) resp.close();
                 }
             }
             chain.append("超过 ").append(MAX_HOPS).append(" 跳重定向，已放弃\n");
 
         } catch (Throwable t) {
+            if (isCancel(t)) {
+                // 换页时我们主动取消的请求：既不算失败，也不必回退给 WebView
+                // （那一页已经走了，再让它重发只会多打一次服务端）
+                return null;
+            }
             rec.kind = Net.Record.KIND_FAILED;
             rec.status = -1;
             rec.cost = System.currentTimeMillis() - t0;
@@ -363,17 +381,116 @@ public class Replay {
         return sb.toString().trim();
     }
 
-    private static byte[] readCapped(ResponseBody body) throws IOException {
+    private static byte[] readCapped(ResponseBody body, ByteArrayOutputStream sink) throws IOException {
         if (body == null) return new byte[0];
         InputStream in = body.byteStream();
-        ByteArrayOutputStream bo = new ByteArrayOutputStream();
         byte[] buf = new byte[16384];
         int n;
         while ((n = in.read(buf)) > 0) {
-            if (bo.size() + n > MAX_BODY) return null;
-            bo.write(buf, 0, n);
+            if (sink.size() + n > MAX_BODY) return null;
+            sink.write(buf, 0, n);
         }
-        return bo.toByteArray();
+        return sink.toByteArray();
+    }
+
+    /**
+     * 边下边传：把 OkHttp 的 body 直接交给 WebView，内存里只留开头几 KB 做预览。
+     * 以前这两档是"读一截就丢弃、再让 WebView 重新请求"，服务端会收到两次。
+     */
+    private static WebResourceResponse handOff(InputStream data, Response resp, Net.Record rec,
+                                               HttpUrl current, String ct, Net.Store store,
+                                               long t0, String note) {
+        rec.kind = Net.Record.KIND_INTERCEPTED;
+        rec.note = note;
+        rec.mime = mimeOf(ct, current.toString(), EMPTY);
+        rec.finalUrl = current.toString();
+        rec.cost = System.currentTimeMillis() - t0;
+        rec.responseHeaders = rec.responseHeaders
+                + "\n\n(" + note + "，内容由 WebView 边读边渲染，面板只保留开头一段)";
+        WebResourceResponse out = new WebResourceResponse(rec.mime,
+                detectCharset(ct, EMPTY, rec.mime), rec.status, reason(rec.status),
+                clean(resp.headers()),
+                new TeeStream(data, resp, rec, store, isText(rec.mime), ct));
+        store.addRecord(rec);
+        return out;
+    }
+
+    /** 抄一份开头给面板做预览，读完后补上真实大小并刷新列表 */
+    private static class TeeStream extends FilterInputStream {
+        private final Response resp;
+        private final Net.Record rec;
+        private final Net.Store store;
+        private final String ct;
+        private final boolean text;
+        private final ByteArrayOutputStream head = new ByteArrayOutputStream();
+        private long total;
+        private boolean closed;
+
+        TeeStream(InputStream in, Response resp, Net.Record rec, Net.Store store,
+                  boolean text, String ct) {
+            super(in);
+            this.resp = resp;
+            this.rec = rec;
+            this.store = store;
+            this.text = text;
+            this.ct = ct;
+        }
+
+        public int read() throws IOException {
+            int c = super.read();
+            if (c >= 0) {
+                total++;
+                if (text && head.size() < PREVIEW_BYTES) head.write(c);
+            }
+            return c;
+        }
+
+        public int read(byte[] b, int off, int len) throws IOException {
+            int n = super.read(b, off, len);
+            if (n > 0) {
+                total += n;
+                if (text) {
+                    int room = PREVIEW_BYTES - head.size();
+                    if (room > 0) head.write(b, off, Math.min(n, room));
+                }
+            }
+            return n;
+        }
+
+        public void close() throws IOException {
+            if (closed) return;
+            closed = true;
+            try { super.close(); } catch (Throwable ignored) { }
+            try { resp.close(); } catch (Throwable ignored) { }
+            try {
+                rec.size = total;
+                if (text && head.size() > 0) {
+                    rec.bodyPreview = preview(head.toByteArray(), ct, rec.mime);
+                }
+                store.touch();
+            } catch (Throwable ignored) { }
+        }
+    }
+
+    /** 换页时叫停上一页还在跑的请求：别让它们继续占并发名额和流量 */
+    public static void cancelAll() {
+        try {
+            if (CLIENT_H1 != null) CLIENT_H1.dispatcher().cancelAll();
+            if (CLIENT_H2 != null) CLIENT_H2.dispatcher().cancelAll();
+            if (CLIENT_H1_INSECURE != null) CLIENT_H1_INSECURE.dispatcher().cancelAll();
+            if (CLIENT_H2_INSECURE != null) CLIENT_H2_INSECURE.dispatcher().cancelAll();
+        } catch (Throwable ignored) { }
+    }
+
+    /** 是不是被我们自己取消的（换页），这种情况不算请求失败 */
+    private static boolean isCancel(Throwable t) {
+        Throwable c = t;
+        for (int i = 0; i < 6 && c != null; i++) {
+            String m = c.getMessage();
+            if (m != null && m.contains("Canceled")) return true;
+            c = c.getCause();
+        }
+        return false;
     }
 
     private static boolean isStream(String ct) {

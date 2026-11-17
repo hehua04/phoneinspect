@@ -122,6 +122,15 @@ public class Net {
             synchronized (records) { records.clear(); }
         }
 
+        /** 只通知界面重画，不新增记录（流式响应读完后补大小用） */
+        public void touch() {
+            main.post(new Runnable() {
+                public void run() {
+                    if (netListener != null) netListener.run();
+                }
+            });
+        }
+
         /** 用户点了「继续访问」的 host:port，只在本次进程内有效 */
         public final java.util.Set<String> insecureHosts =
                 java.util.Collections.synchronizedSet(new java.util.HashSet<String>());

@@ -994,6 +994,8 @@ public class MainActivity extends Activity {
             int nav;
             String page;
             if (r.isForMainFrame()) {
+                // 新页开始：上一页还在跑的请求没必要再跑完
+                Replay.cancelAll();
                 nav = store.startNav(url);
                 page = url;
             } else {
