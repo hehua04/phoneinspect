@@ -199,3 +199,17 @@ build.sh                        一条命令出 APK
 两条链路都要处理：我们自己的 OkHttp 重放，和 WebView 自己的请求（POST、未拦截的资源）。弹窗统一走 `onReceivedSslError` —— 重放失败后返回 `null`，WebView 会重试并触发它，所以在那一处弹一次即可。
 
 例外只在进程内有效，重启 App 会重新询问；这是刻意的，避免一次误点变成长期后门。
+
+## 使用边界
+
+这个工具会把请求重放到自己的网络栈里，所以能拿到 `Set-Cookie`、真实状态码和完整重定向链；它也能在用户确认后，对指定站点信任任意证书。
+
+**只用在你自己拥有的、或已获授权调试的站点上。**
+
+- 所有数据只存在本机：没有账号、没有上传、没有统计、没有第三方 SDK。
+- 为了让 `chrome://inspect` 能接进来做对照，App 无条件开启了 `WebContentsDebuggingEnabled`——能通过 adb 连上这台手机的人，也能查看这个 WebView 里的内容（包括 Cookie）。介意的话别在有敏感登录态的机器上用。
+- 「继续访问（不安全）」只在本次进程内有效，重启即失效，不会变成长期后门。
+
+## 许可
+
+MIT，见 [LICENSE](LICENSE)。内置依赖 OkHttp 与 Okio，均为 Apache-2.0，详见 [THIRD-PARTY.md](THIRD-PARTY.md)。

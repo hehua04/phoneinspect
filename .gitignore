@@ -19,3 +19,8 @@ Thumbs.db
 
 # 真机验证截图
 .shots/
+
+# 内部开发记录：只留本地，不进公开仓库
+QA.md
+FEATURE-GAPS.md
+FEATURE-GAPS-REVIEW.md
