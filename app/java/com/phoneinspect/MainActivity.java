@@ -177,6 +177,7 @@ public class MainActivity extends Activity {
     private TextView btnClear, btnExport, btnPick;
     private TextView elemText, srcText, chipRaw, chipDom, infoBody;
     private LinearLayout logView, elementView, sourceView;
+    private LinearLayout netView;
     private View infoView;
     private ListView netList, logList;
     private EditText evalInput;
@@ -616,7 +617,14 @@ public class MainActivity extends Activity {
                 if (r != null) Detail.show(MainActivity.this, r);
             }
         });
-        content.addView(netList, full());
+        // 网络页套一层：过滤条 + 列表。列表用 weight 吃掉剩下的高度
+        netView = new LinearLayout(this);
+        netView.setOrientation(LinearLayout.VERTICAL);
+        netView.setBackgroundColor(C_BG);
+        netView.addView(buildFilterBar(false), lp(LinearLayout.LayoutParams.MATCH_PARENT, dp(34)));
+        netView.addView(netList, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        content.addView(netView, full());
 
         logView = new LinearLayout(this);
         logView.setOrientation(LinearLayout.VERTICAL);
@@ -625,6 +633,7 @@ public class MainActivity extends Activity {
         logAdapter = new PanelAdapter(this);
         logAdapter.setTab(PanelAdapter.TAB_LOG);
         logList.setAdapter(logAdapter);
+        logView.addView(buildFilterBar(true), lp(LinearLayout.LayoutParams.MATCH_PARENT, dp(34)));
         logView.addView(logList, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
         logView.addView(buildEvalRow(), lp(LinearLayout.LayoutParams.MATCH_PARENT, dp(44)));
@@ -654,6 +663,97 @@ public class MainActivity extends Activity {
     private FrameLayout.LayoutParams full() {
         return new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT);
+    }
+
+    /** 目前选中的过滤分类（0 全部 / 1 失败 / 2 主文档） */
+    private int netFilterKind = PanelAdapter.FILTER_ALL;
+    private int logFilterKind = PanelAdapter.FILTER_ALL;
+
+    /**
+     * 过滤条：关键字 + 分类胶囊。
+     * 只影响展示，数据一条都不动；tab 上会显示 "12/80" 表示过滤掉多少。
+     */
+    private LinearLayout buildFilterBar(final boolean forLog) {
+        LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.HORIZONTAL);
+        bar.setGravity(Gravity.CENTER_VERTICAL);
+        bar.setBackgroundColor(C_SURF);
+        bar.setPadding(dp(8), dp(2), dp(8), dp(2));
+
+        final EditText q = new EditText(this);
+        q.setSingleLine(true);
+        q.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+        q.setTextColor(C_TEXT);
+        q.setHintTextColor(0xFF5A6270);
+        q.setHint(forLog ? "过滤日志内容" : "过滤 URL / 方法 / 说明");
+        q.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        q.setImeOptions(EditorInfo.IME_ACTION_SEARCH);
+        q.setBackground(round(0xFF12141A, 8));
+        q.setPadding(dp(8), 0, dp(8), 0);
+        bar.addView(q, new LinearLayout.LayoutParams(0, dp(26), 1f));
+
+        // 有内容时才出现，和地址栏的 ✕ 一个套路；不然清关键字得长按全选再删
+        final TextView clear = new TextView(this);
+        clear.setText("✕");
+        clear.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f);
+        clear.setTextColor(0xFF7A828E);
+        clear.setPadding(dp(7), 0, dp(7), 0);
+        clear.setVisibility(View.GONE);
+        clear.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) { q.setText(""); }
+        });
+        bar.addView(clear, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.MATCH_PARENT));
+
+        String[] names = forLog
+                ? new String[]{"全部", "警告+", "错误"}
+                : new String[]{"全部", "只看失败", "主文档"};
+        final TextView[] chips = new TextView[names.length];
+        for (int i = 0; i < names.length; i++) {
+            final int idx = i;
+            chips[i] = chip(names[i]);
+            chips[i].setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f);
+            chips[i].setPadding(dp(9), dp(3), dp(9), dp(3));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT, dp(26));
+            lp.leftMargin = dp(6);
+            bar.addView(chips[i], lp);
+            chips[i].setOnClickListener(new View.OnClickListener() {
+                public void onClick(View v) {
+                    for (int k = 0; k < chips.length; k++) {
+                        paintFilterChip(chips[k], k == idx);
+                    }
+                    applyFilter(forLog, q.getText().toString(), idx);
+                }
+            });
+        }
+        for (int i = 0; i < chips.length; i++) paintFilterChip(chips[i], i == 0);
+
+        q.addTextChangedListener(new TextWatcher() {
+            public void beforeTextChanged(CharSequence s, int a, int b, int c) { }
+            public void onTextChanged(CharSequence s, int a, int b, int c) { }
+            public void afterTextChanged(Editable e) {
+                clear.setVisibility(e.length() == 0 ? View.GONE : View.VISIBLE);
+                applyFilter(forLog, e.toString(), forLog ? logFilterKind : netFilterKind);
+            }
+        });
+        return bar;
+    }
+
+    private void paintFilterChip(TextView c, boolean on) {
+        c.setTextColor(on ? 0xFF0F1115 : C_DIM);
+        c.setBackground(round(on ? C_ACC : 0xFF232830, 6));
+    }
+
+    private void applyFilter(boolean forLog, String q, int kind) {
+        if (forLog) {
+            logFilterKind = kind;
+            if (logAdapter != null) logAdapter.setLogFilter(q, kind);
+        } else {
+            netFilterKind = kind;
+            if (netAdapter != null) netAdapter.setFilter(q, kind);
+        }
+        refreshCounts();
     }
 
     private View buildEvalRow() {
@@ -1079,7 +1179,7 @@ public class MainActivity extends Activity {
             tabs[i].setBackground(round(on ? 0xFF232830 : 0x00000000, 6));
         }
 
-        netList.setVisibility(t == PanelAdapter.TAB_NET ? View.VISIBLE : View.GONE);
+        netView.setVisibility(t == PanelAdapter.TAB_NET ? View.VISIBLE : View.GONE);
         logView.setVisibility(t == PanelAdapter.TAB_LOG ? View.VISIBLE : View.GONE);
         elementView.setVisibility(t == PanelAdapter.TAB_ELEM ? View.VISIBLE : View.GONE);
         sourceView.setVisibility(t == PanelAdapter.TAB_SRC ? View.VISIBLE : View.GONE);
@@ -1097,10 +1197,17 @@ public class MainActivity extends Activity {
     }
 
     private void refreshCounts() {
-        tabNet.setText("网络 " + store.recordCount());
-        tabLog.setText("控制台 " + store.logCount());
         if (netAdapter != null) netAdapter.notifyDataSetChanged();
         if (logAdapter != null) logAdapter.notifyDataSetChanged();
+
+        // 过滤生效时显示 "12/80"，避免误以为"只有 12 条请求"
+        int total = store.recordCount();
+        int vis = netAdapter == null ? total : netAdapter.visibleCount();
+        tabNet.setText(vis == total ? "网络 " + total : "网络 " + vis + "/" + total);
+
+        int lTotal = store.logCount();
+        int lVis = logAdapter == null ? lTotal : logAdapter.visibleCount();
+        tabLog.setText(lVis == lTotal ? "控制台 " + lTotal : "控制台 " + lVis + "/" + lTotal);
     }
 
     // ---- 证书例外 ----
@@ -1608,7 +1715,7 @@ public class MainActivity extends Activity {
      */
     private void applyPanel() {
         if (panel == null) return;
-        boolean typingInPanel = imeOpen && evalInput != null && evalInput.hasFocus();
+        boolean typingInPanel = imeOpen && panel.hasFocus();
         boolean show = panelOn && (!imeOpen || typingInPanel);
         panel.setVisibility(show ? View.VISIBLE : View.GONE);
         fitAboveKeyboard();

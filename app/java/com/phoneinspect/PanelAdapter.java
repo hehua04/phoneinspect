@@ -39,6 +39,15 @@ public class PanelAdapter extends BaseAdapter {
     private final List<Row> netRows = new ArrayList<Row>();
     private final List<Row> logRows = new ArrayList<Row>();
 
+    /** 过滤条件：关键字 + 快捷分类。只影响展示，不动数据 */
+    private String filterText = "";
+    private int filterNet = FILTER_ALL;
+    private int filterLog = FILTER_ALL;
+
+    public static final int FILTER_ALL = 0;
+    public static final int FILTER_FAIL = 1;   // 网络：失败 / 控制台：警告以上
+    public static final int FILTER_MAIN = 2;   // 网络：主文档 / 控制台：只看错误
+
     public PanelAdapter(Context c) {
         this.ctx = c;
     }
@@ -46,6 +55,55 @@ public class PanelAdapter extends BaseAdapter {
     public void setTab(int t) {
         tab = t;
         notifyDataSetChanged();
+    }
+
+    public void setFilter(String q, int kind) {
+        String t = q == null ? "" : q.trim().toLowerCase();
+        if (t.equals(filterText) && kind == filterNet) return;
+        filterText = t;
+        filterNet = kind;
+        notifyDataSetChanged();
+    }
+
+    public void setLogFilter(String q, int level) {
+        String t = q == null ? "" : q.trim().toLowerCase();
+        if (t.equals(filterText) && level == filterLog) return;
+        filterText = t;
+        filterLog = level;
+        notifyDataSetChanged();
+    }
+
+    /** 当前展示的记录条数（不含分隔行），用来在 tab 上显示 "12/80" */
+    public int visibleCount() {
+        List<Row> rows = tab == TAB_NET ? netRows : logRows;
+        int n = 0;
+        for (int i = 0; i < rows.size(); i++) {
+            if (rows.get(i).type != Row.HEADER) n++;
+        }
+        return n;
+    }
+
+    private boolean match(Net.Record r) {
+        if (filterNet == FILTER_FAIL && !isFail(r)) return false;
+        if (filterNet == FILTER_MAIN && !r.mainFrame) return false;
+        if (filterText.length() == 0) return true;
+        return has(r.url) || has(r.finalUrl) || has(r.method) || has(r.note);
+    }
+
+    private boolean isFail(Net.Record r) {
+        return r.kind == Net.Record.KIND_FAILED || r.status >= 400;
+    }
+
+    private boolean matchLog(Net.LogItem l) {
+        if (filterLog == FILTER_FAIL
+                && !("warn".equals(l.level) || "error".equals(l.level))) return false;
+        if (filterLog == FILTER_MAIN && !"error".equals(l.level)) return false;
+        return filterText.length() == 0 || (l.msg != null
+                && l.msg.toLowerCase().contains(filterText));
+    }
+
+    private boolean has(String s) {
+        return s != null && s.toLowerCase().contains(filterText);
     }
 
     /** 取快照：把「记录列表」翻译成「行列表」，中间插入导航分隔行 */
@@ -57,8 +115,10 @@ public class PanelAdapter extends BaseAdapter {
             }
             netRows.clear();
             int lastNav = Integer.MIN_VALUE;
+            int shown = 0;
             for (int i = 0; i < copy.size(); i++) {
                 Net.Record r = copy.get(i);
+                if (!match(r)) continue;
                 if (r.navId != lastNav) {
                     netRows.add(header(r.navId, r.pageUrl));
                     lastNav = r.navId;
@@ -68,7 +128,9 @@ public class PanelAdapter extends BaseAdapter {
                 row.id = r.id;
                 row.r = r;
                 netRows.add(row);
+                shown++;
             }
+            if (shown == 0) netRows.add(hint(copy.size()));
         } else if (tab == TAB_LOG) {
             List<Net.LogItem> copy;
             synchronized (store.logs) {
@@ -76,8 +138,10 @@ public class PanelAdapter extends BaseAdapter {
             }
             logRows.clear();
             int lastNav = Integer.MIN_VALUE;
+            int shown = 0;
             for (int i = 0; i < copy.size(); i++) {
                 Net.LogItem l = copy.get(i);
+                if (!matchLog(l)) continue;
                 if (l.navId != lastNav) {
                     logRows.add(header(l.navId, l.pageUrl));
                     lastNav = l.navId;
@@ -87,7 +151,9 @@ public class PanelAdapter extends BaseAdapter {
                 row.id = l.id;
                 row.l = l;
                 logRows.add(row);
+                shown++;
             }
+            if (shown == 0) logRows.add(hint(copy.size()));
         }
     }
 
@@ -95,6 +161,16 @@ public class PanelAdapter extends BaseAdapter {
     public void notifyDataSetChanged() {
         reload();
         super.notifyDataSetChanged();
+    }
+
+    private Row hint(int total) {
+        Row row = new Row();
+        row.type = Row.HEADER;
+        row.id = -1;
+        row.title = total == 0
+                ? "还没有记录。加载一个页面，或切到「仅记录」模式对照。"
+                : "没有匹配的记录（共 " + total + " 条，试试清空关键字或换个分类）";
+        return row;
     }
 
     private Row header(int navId, String pageUrl) {
