@@ -71,7 +71,7 @@ PhoneInspect 把拦截搬到 WebView 的原生层，用 OkHttp（`libs/okhttp-3.
 - **原文**：拦截层拿到的服务器响应字节，解码后展示。这是真正的 `view-source`，注释、原始缩进、还没被 JS 渲染的模板都在，上限 512KB。原文里有、DOM 里没有的东西，就是被 JS 改写掉的。
 - **DOM**：`document.documentElement.outerHTML` 快照，反映 JS 执行后的结构。分片回传避免 IPC 大包，上限 800KB。
 
-**控制台** —— 底部输入框在页面上下文执行 JS，结果显示为紫色 `[eval]` 日志。用 `eval` 而不是函数包裹，`return` 和局部变量声明都是正常语义。
+**控制台** —— 底部输入框在页面上下文执行 JS，结果显示为紫色 `[eval]` 日志。优先用 `eval` 而不是函数包裹，`return` 和局部变量声明都是正常语义。页面 CSP 的 `script-src` 不含 `'unsafe-eval'` 时自动改走直接注入：宿主 `evaluateJavascript` 不受页面 CSP 约束，否则严格 CSP 的站点连 `document.title` 都执行不了。
 
 ## 崩溃日志
 App 会接管未捕获异常，把堆栈写到 `Android/data/com.phoneinspect/files/crash/`（保留最近 5 份），下次启动时自动出现在「控制台」里，不需要连电脑。
@@ -88,13 +88,17 @@ adb logcat AndroidRuntime:E *:S # 只看异常
 版本号唯一来源是 `version.properties`，`build.sh` 读它并通过 `aapt2 --version-code/--version-name` 注入，清单里不写死，避免两处漂移。
 
 ```
-versionCode=21
-versionName=1.4.0
+versionCode=22
+versionName=1.4.1
 ```
 
 改完直接 `bash build.sh`，App 内「信息」面板会显示当前安装的版本。每次发版记得 `versionCode` +1；加功能升中版本，修问题升修订号。
 
 ### 变更记录
+
+**1.4.1** —— 控制台在严格 CSP 站点可用
+
+- 页面 `script-src` 不含 `'unsafe-eval'` 时，控制台不再把输入交给页面里的 `eval`，改由宿主直接注入执行；`document.title` 这类最基础的表达式不会再被 CSP 拦掉。正常站点仍走 `eval`，语义不变。
 
 **1.4.0** —— 从"能看到"补到"看得懂"
 

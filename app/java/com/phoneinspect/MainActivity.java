@@ -197,6 +197,9 @@ public class MainActivity extends Activity {
     private boolean srcDom = false;
     private boolean imeOpen = false;
     private boolean panelOn = true;
+    // 页面 CSP 的 script-src 不含 'unsafe-eval' 时，页面里的 eval() 会被拦。
+    // 每换一次文档重新探测，避免上一个站点的结论串到下一个站点。
+    private boolean evalCspBlocked = false;
     private View rootView;
 
     @Override
@@ -1047,6 +1050,7 @@ public class MainActivity extends Activity {
         }
 
         public void onPageStarted(WebView v, String u, Bitmap f) {
+            evalCspBlocked = false;
             resetPick();
             // 换了文档，上一页拾取到的元素信息一定失效。
             // 不清掉的话，在新页面上点「元素」会看到上一站的标签和样式（实测过）
@@ -1552,18 +1556,49 @@ public class MainActivity extends Activity {
         } catch (Throwable t) {
             lit = "\"\"";
         }
+        if (evalCspBlocked) {
+            runEvalInline(code);
+            return;
+        }
+
         String js = "(function(){try{var r=eval(" + lit + ");"
                 + "return window.__pi_fmt?window.__pi_fmt(r):String(r);}"
-                + "catch(e){return 'ERROR: '+(e&&e.message?e.message:e);}})()";
+                + "catch(e){var m=(e&&e.message)?e.message:String(e);var low=m.toLowerCase();"
+                + "return (low.indexOf('unsafe-eval')>=0||low.indexOf('content security policy')>=0"
+                + "||low.indexOf('eval() blocked')>=0)?'__PI_EVAL_BLOCKED_BY_CSP__':('ERROR: '+m);}})()";
 
         web.evaluateJavascript(js, new ValueCallback<String>() {
             public void onReceiveValue(String v) {
-                Net.LogItem l = new Net.LogItem();
-                l.level = "eval";
-                l.msg = code + "\n→ " + unescape(v);
-                store.addLog(l);
+                String out = unescape(v);
+                if ("__PI_EVAL_BLOCKED_BY_CSP__".equals(out)) {
+                    evalCspBlocked = true;
+                    runEvalInline(code);
+                } else {
+                    addEvalLog(code, out);
+                }
             }
         });
+    }
+
+    /**
+     * eval 被页面 CSP 拦掉时的退路：把代码直接拼进脚本，交给 evaluateJavascript 执行。
+     * 宿主注入的脚本不受页面 script-src 约束，所以这里能跑；代价是拿不到 eval 的包装，
+     * 只能返回脚本本身的完成值（最后一条语句的值），undefined 会显示成 null。
+     */
+    private void runEvalInline(final String code) {
+        String js = "try{" + code + "\n}catch(e){'ERROR: '+(e&&e.message?e.message:e)}";
+        web.evaluateJavascript(js, new ValueCallback<String>() {
+            public void onReceiveValue(String v) {
+                addEvalLog(code, unescape(v));
+            }
+        });
+    }
+
+    private void addEvalLog(String code, String out) {
+        Net.LogItem l = new Net.LogItem();
+        l.level = "eval";
+        l.msg = code + "\n→ " + out;
+        store.addLog(l);
     }
 
     private static String unescape(String v) {
