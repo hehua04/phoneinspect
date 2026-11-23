@@ -26,5 +26,12 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- 导出分享：只读暴露 cacheDir/exports，URI 通过 ACTION_SEND 临时授权 -->
+        <provider
+            android:name=".ExportProvider"
+            android:authorities="com.phoneinspect.export"
+            android:exported="false"
+            android:grantUriPermissions="true" />
     </application>
 </manifest>

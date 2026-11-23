@@ -88,13 +88,18 @@ adb logcat AndroidRuntime:E *:S # 只看异常
 版本号唯一来源是 `version.properties`，`build.sh` 读它并通过 `aapt2 --version-code/--version-name` 注入，清单里不写死，避免两处漂移。
 
 ```
-versionCode=22
-versionName=1.4.1
+versionCode=23
+versionName=1.5.0
 ```
 
 改完直接 `bash build.sh`，App 内「信息」面板会显示当前安装的版本。每次发版记得 `versionCode` +1；加功能升中版本，修问题升修订号。
 
 ### 变更记录
+
+**1.5.0** —— 导出与分享
+
+- 「导出」不再只往应用私有目录写一个找不到的 txt：现在会把网络记录、控制台日志和运行环境拼成一份文本，可选「分享…」走系统分享面板，或「保存到文件…」自己选位置（SAF，不需要存储权限）。
+- 导出内容补上四态、说明、重定向链、请求头和响应头；文件不经过剪贴板。
 
 **1.4.1** —— 控制台在严格 CSP 站点可用
 
@@ -168,7 +173,7 @@ WebView 拿到"看起来像正常响应"的内容并渲染
 - **DOM 快照有失真**。不含 shadow DOM，`<input>` 的当前输入值也不在 `outerHTML` 里（那是属性不是属性值）。
 - **源码原文依赖拦截模式**。需要处于「拦截 GET」并刷新一次页面，否则「原文」视图是空的。
 - **JS 桥 `PI` 对所有页面开放**。恶意页面理论上能刷日志（有 500 条上限，风险很低）。只在调试自己的站点时用。
-- **导出写文件不写剪贴板**。记录含 `Set-Cookie`，剪贴板对其它 App 可读。文件落在 `Android/data/com.phoneinspect/files/export/`。
+- **导出走文件或分享，不写剪贴板**。记录含 `Set-Cookie`，剪贴板对其它 App 可读；分享前确认接收方可信。分享用的临时文件落在应用 cache，只保留最近 5 份。
 - **每个 GET 多一次往返**。实测 24 张同域图（每张 300ms 延迟）拦截模式 2.0s、原生 3.0s；延迟极高的网络下仍会比原生慢一点。
 - 记录只存在内存里，切后台被回收就没了，最多保留 400 条。
 
@@ -180,7 +185,7 @@ WebView 拿到"看起来像正常响应"的内容并渲染
 - **POST 请求体**。`WebResourceRequest` 根本不提供，改不了。
 - **Service Worker 注册与 CacheStorage 清理**。「清缓存」只清 HTTP 缓存和 DOM Storage，SW 需要另一套 API，收益低于复杂度。
 - **macOS 构建脚本**。`bootstrap.sh` 只写了 Windows/Linux 两条分支，mac 用户可以手动放 SDK。
-- **HAR 导出**。现在只有 txt。真要 HAR 得处理 base64 body 和 `_initiator` 字段，且大响应落盘会吃掉手机存储。
+- **HAR 导出**。现在只有纯文本。真要 HAR 得处理 base64 body 和 `_initiator` 字段，且大响应落盘会吃掉手机存储。
 - **把记录持久化到磁盘**。会顺带把 Cookie 写进文件，风险大于收益。
 
 ## 目录
@@ -195,6 +200,7 @@ app/
     Net.java                    数据模型与内存存储
     PanelAdapter.java           请求列表 / 日志列表
     Detail.java                 请求详情弹窗
+    ExportProvider.java         导出分享用的只读 ContentProvider
 libs/
   okhttp-3.14.9.jar             纯 Java 版 OkHttp（非 4.x 的 Kotlin 版）
   okio-1.17.2.jar               OkHttp 依赖

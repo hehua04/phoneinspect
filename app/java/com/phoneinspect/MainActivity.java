@@ -2,8 +2,10 @@ package com.phoneinspect;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.ClipData;
 import android.content.Context;
 import android.content.DialogInterface;
+import android.content.Intent;
 import android.content.pm.PackageInfo;
 import android.content.res.Configuration;
 import android.graphics.Bitmap;
@@ -11,6 +13,7 @@ import android.graphics.Rect;
 import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
+import android.net.Uri;
 import android.net.http.SslError;
 import android.os.Build;
 import android.os.Bundle;
@@ -54,11 +57,14 @@ import org.json.JSONTokener;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
-import java.io.OutputStreamWriter;
+import java.io.OutputStream;
 import java.io.PrintWriter;
 import java.io.StringWriter;
+import java.text.SimpleDateFormat;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.Date;
+import java.util.Locale;
 import java.util.Map;
 
 public class MainActivity extends Activity {
@@ -69,6 +75,8 @@ public class MainActivity extends Activity {
     private static final int C_TEXT = 0xFFE6E8EB;
     private static final int C_DIM = 0xFF8B929E;
     private static final int C_ACC = 0xFF4C8DFF;
+
+    private static final int REQ_EXPORT_SAVE = 1001;
 
     private static final String JS =
             "(function(){if(window.__PI__)return;window.__PI__=1;"
@@ -200,6 +208,8 @@ public class MainActivity extends Activity {
     // 页面 CSP 的 script-src 不含 'unsafe-eval' 时，页面里的 eval() 会被拦。
     // 每换一次文档重新探测，避免上一个站点的结论串到下一个站点。
     private boolean evalCspBlocked = false;
+    /** 「保存到文件」选择完位置后，onActivityResult 用它写内容 */
+    private String pendingExport;
     private View rootView;
 
     @Override
@@ -1294,9 +1304,11 @@ public class MainActivity extends Activity {
         sourceView.setVisibility(t == PanelAdapter.TAB_SRC ? View.VISIBLE : View.GONE);
         infoView.setVisibility(t == PanelAdapter.TAB_INFO ? View.VISIBLE : View.GONE);
 
+        // 导出内容同时包含网络和控制台，所以两个 tab 都应该能导出
         btnClear.setVisibility(t == PanelAdapter.TAB_NET || t == PanelAdapter.TAB_LOG
                 ? View.VISIBLE : View.GONE);
-        btnExport.setVisibility(t == PanelAdapter.TAB_NET ? View.VISIBLE : View.GONE);
+        btnExport.setVisibility(t == PanelAdapter.TAB_NET || t == PanelAdapter.TAB_LOG
+                ? View.VISIBLE : View.GONE);
 
         if (t == PanelAdapter.TAB_ELEM) renderElement();
         if (t == PanelAdapter.TAB_SRC) setSrcMode(srcDom);
@@ -1691,52 +1703,202 @@ public class MainActivity extends Activity {
         }
     }
 
+    // ---- 导出 / 分享 ----
+
     private void exportAll() {
-        StringBuilder sb = new StringBuilder();
-        sb.append("# PhoneInspect 导出\n\n");
-        synchronized (store.records) {
-            for (int i = store.records.size() - 1; i >= 0; i--) {
-                Net.Record r = store.records.get(i);
-                sb.append(r.method).append(' ').append(r.url).append('\n');
-                sb.append("  status=").append(r.status)
-                        .append("  cost=").append(r.cost).append("ms")
-                        .append("  size=").append(r.size).append("B\n");
-                if (r.chain != null && r.chain.length() > 0) {
-                    sb.append("  重定向链:\n");
-                    String[] cl = r.chain.split("\n");
-                    for (int k = 0; k < cl.length; k++) sb.append("    ").append(cl[k]).append('\n');
-                }
-                if (r.responseHeaders != null && r.responseHeaders.length() > 0) {
-                    sb.append("  响应头:\n");
-                    String[] hl = r.responseHeaders.split("\n");
-                    for (int k = 0; k < hl.length; k++) sb.append("    ").append(hl[k]).append('\n');
-                }
-                sb.append('\n');
-            }
-        }
-        if (sb.length() < 60) {
+        final String text = buildExport();
+        if (text == null) {
             Toast.makeText(this, "还没有记录", Toast.LENGTH_SHORT).show();
             return;
         }
-        // 记录里含 Set-Cookie，写文件而不是塞剪贴板（剪贴板对其它 App 可读）
-        File dir = getExternalFilesDir("export");
-        if (dir == null) {
-            Toast.makeText(this, "无法访问存储目录", Toast.LENGTH_SHORT).show();
+        new AlertDialog.Builder(this)
+                .setTitle("导出")
+                .setItems(new String[]{"分享…", "保存到文件…"},
+                        new DialogInterface.OnClickListener() {
+                            public void onClick(DialogInterface d, int which) {
+                                if (which == 0) shareExport(text);
+                                else saveExport(text);
+                            }
+                        })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    /** 网络、控制台和运行环境拼成一份纯文本，两条出口共用 */
+    private String buildExport() {
+        int rc = store.recordCount();
+        int lc = store.logCount();
+        if (rc == 0 && lc == 0) return null;
+
+        StringBuilder sb = new StringBuilder(64 * 1024);
+        sb.append("# PhoneInspect 导出\n\n");
+        sb.append("时间  ").append(new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
+                .format(new Date())).append('\n');
+        sb.append("版本  ").append(versionText()).append('\n');
+        sb.append("设备  ").append(Build.MANUFACTURER).append(' ').append(Build.MODEL).append('\n');
+        sb.append("系统  Android ").append(Build.VERSION.RELEASE)
+                .append("  (API ").append(Build.VERSION.SDK_INT).append(")\n");
+        sb.append("模式  ").append(modeName()).append('\n');
+        sb.append("协议  ").append(protoName()).append('\n');
+        sb.append("页面  ").append(store.currentPageUrl).append('\n');
+        sb.append("记录  ").append(rc).append(" 条请求 / ").append(lc).append(" 条日志\n\n");
+        sb.append("# 含请求头、Set-Cookie 与响应头，分享前确认接收方可信。\n\n");
+
+        sb.append("## 网络（从早到晚）\n\n");
+        synchronized (store.records) {
+            for (int i = store.records.size() - 1; i >= 0; i--) {
+                Net.Record r = store.records.get(i);
+                sb.append("[#").append(r.navId).append("] ")
+                        .append(r.method).append(' ').append(r.url).append('\n');
+                sb.append("  status=").append(r.status >= 0 ? String.valueOf(r.status) : "-")
+                        .append("  ").append(kindName(r.kind))
+                        .append("  cost=").append(r.cost).append("ms")
+                        .append("  size=").append(r.size).append('B');
+                if (r.protocol != null && r.protocol.length() > 0) {
+                    sb.append("  proto=").append(r.protocol);
+                }
+                if (r.mainFrame) sb.append("  main");
+                sb.append('\n');
+
+                if (r.finalUrl != null && r.finalUrl.length() > 0 && !r.finalUrl.equals(r.url)) {
+                    sb.append("  final=").append(r.finalUrl).append('\n');
+                }
+                if (r.note != null && r.note.length() > 0) {
+                    sb.append("  note=").append(r.note).append('\n');
+                }
+                appendBlock(sb, "重定向链", r.chain);
+                appendBlock(sb, "请求头", r.requestHeaders);
+                appendBlock(sb, "响应头", r.responseHeaders);
+                sb.append('\n');
+            }
+        }
+
+        sb.append("## 控制台（从早到晚）\n\n");
+        synchronized (store.logs) {
+            for (int i = store.logs.size() - 1; i >= 0; i--) {
+                Net.LogItem l = store.logs.get(i);
+                sb.append('[').append(l.level).append("] ").append(l.msg).append('\n');
+            }
+        }
+        return sb.toString();
+    }
+
+    private static void appendBlock(StringBuilder sb, String title, String text) {
+        if (text == null || text.length() == 0) return;
+        sb.append("  ").append(title).append(":\n");
+        String[] lines = text.split("\n");
+        for (int i = 0; i < lines.length; i++) {
+            sb.append("    ").append(lines[i]).append('\n');
+        }
+    }
+
+    private static String kindName(int kind) {
+        switch (kind) {
+            case Net.Record.KIND_SKIPPED_BEFORE: return "未发送";
+            case Net.Record.KIND_SKIPPED_AFTER: return "已探测未接管";
+            case Net.Record.KIND_FAILED: return "失败";
+            default: return "已接管";
+        }
+    }
+
+    private String modeName() {
+        return mode == Net.MODE_INTERCEPT ? "拦截 GET"
+                : mode == Net.MODE_RECORD ? "仅记录" : "关闭";
+    }
+
+    private String protoName() {
+        return proto == Net.PROTO_H1 ? "仅 HTTP/1.1"
+                : proto == Net.PROTO_H2 ? "探测 HTTP/2" : "自动（h2 优先）";
+    }
+
+    private void shareExport(String text) {
+        File f;
+        try {
+            f = writeExportFile(text);
+        } catch (Throwable t) {
+            Toast.makeText(this, "写导出文件失败：" + t, Toast.LENGTH_SHORT).show();
             return;
         }
-        dir.mkdirs();
-        File f = new File(dir, "phoneinspect-" + System.currentTimeMillis() + ".txt");
-        FileOutputStream fos = null;
+
+        Uri uri = Uri.parse("content://" + ExportProvider.AUTHORITY + "/" + f.getName());
+        Intent i = new Intent(Intent.ACTION_SEND);
+        i.setType("text/plain");
+        i.putExtra(Intent.EXTRA_STREAM, uri);
+        i.putExtra(Intent.EXTRA_SUBJECT, "PhoneInspect 导出");
+        i.setClipData(ClipData.newRawUri("export", uri));
+        i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
         try {
-            fos = new FileOutputStream(f);
-            OutputStreamWriter w = new OutputStreamWriter(fos, "UTF-8");
-            w.write(sb.toString());
-            w.flush();
-            Toast.makeText(this, "已导出到\n" + f.getAbsolutePath(), Toast.LENGTH_LONG).show();
+            startActivity(Intent.createChooser(i, "分享导出"));
         } catch (Throwable t) {
-            Toast.makeText(this, "导出失败：" + t, Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "没有可分享的应用", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void saveExport(String text) {
+        pendingExport = text;
+        Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("text/plain");
+        i.putExtra(Intent.EXTRA_TITLE, "phoneinspect-" + exportStamp() + ".txt");
+        try {
+            startActivityForResult(i, REQ_EXPORT_SAVE);
+        } catch (Throwable t) {
+            pendingExport = null;
+            Toast.makeText(this, "打不开文件选择器：" + t, Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private File writeExportFile(String text) throws Exception {
+        File dir = new File(getCacheDir(), "exports");
+        if (!dir.isDirectory() && !dir.mkdirs()) throw new Exception("无法创建缓存目录");
+        File f = new File(dir, "phoneinspect-" + exportStamp() + ".txt");
+        FileOutputStream fos = new FileOutputStream(f);
+        try {
+            fos.write(text.getBytes("UTF-8"));
+            fos.flush();
         } finally {
-            try { if (fos != null) fos.close(); } catch (Throwable ignored) { }
+            try { fos.close(); } catch (Throwable ignored) { }
+        }
+
+        // 只留最近 5 份，免得缓存越攒越大
+        File[] all = dir.listFiles();
+        if (all != null && all.length > 5) {
+            Arrays.sort(all, new Comparator<File>() {
+                public int compare(File a, File b) {
+                    return Long.compare(a.lastModified(), b.lastModified());
+                }
+            });
+            for (int i = 0; i < all.length - 5; i++) all[i].delete();
+        }
+        return f;
+    }
+
+    private static String exportStamp() {
+        return new SimpleDateFormat("yyyyMMdd-HHmmss-SSS", Locale.US).format(new Date());
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != REQ_EXPORT_SAVE) return;
+
+        String text = pendingExport;
+        pendingExport = null;
+        if (resultCode != RESULT_OK || data == null || data.getData() == null || text == null) {
+            return;
+        }
+
+        OutputStream os = null;
+        try {
+            os = getContentResolver().openOutputStream(data.getData());
+            if (os == null) throw new Exception("无法写入所选位置");
+            os.write(text.getBytes("UTF-8"));
+            os.flush();
+            Toast.makeText(this, "已保存", Toast.LENGTH_SHORT).show();
+        } catch (Throwable t) {
+            Toast.makeText(this, "保存失败：" + t, Toast.LENGTH_SHORT).show();
+        } finally {
+            try { if (os != null) os.close(); } catch (Throwable ignored) { }
         }
     }
 
