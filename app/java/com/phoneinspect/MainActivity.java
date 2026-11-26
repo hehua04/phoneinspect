@@ -1888,9 +1888,17 @@ public class MainActivity extends Activity {
             return;
         }
 
+        Uri target = data.getData();
+        if (!Uri.SCHEME_CONTENT.equals(target.getScheme())
+                || checkUriPermission(target, android.os.Process.myPid(), android.os.Process.myUid(),
+                        Intent.FLAG_GRANT_WRITE_URI_PERMISSION) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            Toast.makeText(this, "无法写入所选位置", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
         OutputStream os = null;
         try {
-            os = getContentResolver().openOutputStream(data.getData());
+            os = getContentResolver().openOutputStream(target);
             if (os == null) throw new Exception("无法写入所选位置");
             os.write(text.getBytes("UTF-8"));
             os.flush();
