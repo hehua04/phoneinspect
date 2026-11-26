@@ -194,15 +194,16 @@ public class Replay {
         try {
             // 必须放在 try 里：协议配置非法时 client() 会抛异常，
             // 一旦漏到 shouldInterceptRequest 外面就是未捕获异常，整个进程会被杀掉。
-            boolean insecure = store.insecureHosts.contains(hostKey(current));
-            OkHttpClient client = client(protoChoice, insecure);
-
+            boolean forwardAuthorization = true;
             for (int hop = 0; hop <= MAX_HOPS; hop++) {
+                boolean insecure = current.isHttps() && store.insecureHosts.contains(hostKey(current));
+                OkHttpClient client = client(protoChoice, insecure);
                 Request.Builder rb = new Request.Builder().url(current).get();
                 if (reqHeaders != null) {
                     for (Map.Entry<String, String> e : reqHeaders.entrySet()) {
                         String k = e.getKey();
                         if (k == null || skip(k)) continue;
+                        if (!forwardAuthorization && k.equalsIgnoreCase("Authorization")) continue;
                         try {
                             rb.header(k, e.getValue());
                         } catch (Throwable ignored) { }
@@ -242,6 +243,10 @@ public class Replay {
                         pushCookies(current.toString(), resp.headers("Set-Cookie"));
                         HttpUrl next = current.resolve(loc);
                         if (next == null) break;
+                        forwardAuthorization = forwardAuthorization
+                                && current.scheme().equals(next.scheme())
+                                && current.host().equals(next.host())
+                                && current.port() == next.port();
                         current = next;
                         continue;
                     }
@@ -265,28 +270,32 @@ public class Replay {
 
                     ResponseBody body = resp.body();
                     long declared = body == null ? -1 : body.contentLength();
+                    rec.chain = chain.toString();
+                    pushCookies(current.toString(), resp.headers("Set-Cookie"));
 
                     // 流媒体 / 超大响应不再"读一截再丢弃"，改成边下边传：
                     // 服务端只会收到一次请求，内存也不会被几十兆占住。
                     if (isStream(ct) || declared > MAX_BODY) {
-                        handedOff = true;
                         boolean stream = isStream(ct);
                         InputStream bin = body == null
                                 ? new ByteArrayInputStream(EMPTY) : body.byteStream();
-                        return handOff(bin, resp, rec, current, ct, store, t0,
+                        WebResourceResponse out = handOff(bin, resp, rec, current, ct, store, t0,
                                 stream ? "流式透传（内容不进面板）"
                                         : "边下边传（超过 " + (MAX_BODY / 1024 / 1024) + "MB）");
+                        handedOff = true;
+                        return out;
                     }
 
                     ByteArrayOutputStream partial = new ByteArrayOutputStream();
                     byte[] data = readCapped(body, partial);
                     if (data == null) {
                         // 长度未知（chunked）但实际超过上限：已读到的部分 + 剩余字节接上去继续传
-                        handedOff = true;
                         InputStream joined = new SequenceInputStream(
                                 new ByteArrayInputStream(partial.toByteArray()), body.byteStream());
-                        return handOff(joined, resp, rec, current, ct, store, t0,
+                        WebResourceResponse out = handOff(joined, resp, rec, current, ct, store, t0,
                                 "边下边传（长度未知且超过 " + (MAX_BODY / 1024 / 1024) + "MB）");
+                        handedOff = true;
+                        return out;
                     }
 
                     rec.size = data.length;
@@ -294,8 +303,6 @@ public class Replay {
                     rec.mime = mimeOf(ct, current.toString(), data);
                     rec.finalUrl = current.toString();
                     rec.bodyPreview = preview(data, ct, rec.mime);
-                    rec.chain = chain.toString();
-                    pushCookies(current.toString(), resp.headers("Set-Cookie"));
 
                     // 主文档的原始字节留一份，供「源码 · 原文」视图使用。
                     // 这是服务器真实输出，比 outerHTML 更可信（注释、缩进、模板都在）。
@@ -363,11 +370,12 @@ public class Replay {
      * 条件请求头会导致返回 304 空包，页面会变白。
      */
     private static boolean skip(String k) {
-        String l = k.toLowerCase();
+        String l = k.toLowerCase(java.util.Locale.ROOT);
         return l.equals("host") || l.equals("connection") || l.equals("content-length")
                 || l.equals("content-type") || l.equals("accept-encoding")
                 || l.equals("transfer-encoding") || l.equals("upgrade")
-                || l.equals("proxy-connection") || l.equals("if-none-match")
+                || l.equals("proxy-connection") || l.equals("proxy-authorization")
+                || l.equals("if-none-match")
                 || l.equals("if-modified-since") || l.equals("if-range")
                 || l.equals("cookie");
     }
@@ -387,8 +395,8 @@ public class Replay {
         byte[] buf = new byte[16384];
         int n;
         while ((n = in.read(buf)) > 0) {
-            if (sink.size() + n > MAX_BODY) return null;
             sink.write(buf, 0, n);
+            if (sink.size() > MAX_BODY) return null;
         }
         return sink.toByteArray();
     }

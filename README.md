@@ -88,13 +88,19 @@ adb logcat AndroidRuntime:E *:S # 只看异常
 版本号唯一来源是 `version.properties`，`build.sh` 读它并通过 `aapt2 --version-code/--version-name` 注入，清单里不写死，避免两处漂移。
 
 ```
-versionCode=23
-versionName=1.5.0
+versionCode=24
+versionName=1.5.1
 ```
 
 改完直接 `bash build.sh`，App 内「信息」面板会显示当前安装的版本。每次发版记得 `versionCode` +1；加功能升中版本，修问题升修订号。
 
 ### 变更记录
+
+**1.5.1** —— 修复流式响应、跨源跳转和导出保存
+
+- 修复未知长度的大响应在切换流式传输时丢字节的问题，流式响应也会写回 Cookie 并记录重定向链。
+- 跨源跳转不再携带原请求的 `Authorization`，TLS 证书例外按每一跳的目标单独判断。
+- 从文件选择器返回时，即使应用进程已被系统重启，也能继续保存导出。
 
 **1.5.0** —— 导出与分享
 

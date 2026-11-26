@@ -60,6 +60,7 @@ import java.io.FileOutputStream;
 import java.io.OutputStream;
 import java.io.PrintWriter;
 import java.io.StringWriter;
+import java.nio.file.Files;
 import java.text.SimpleDateFormat;
 import java.util.Arrays;
 import java.util.Comparator;
@@ -77,6 +78,7 @@ public class MainActivity extends Activity {
     private static final int C_ACC = 0xFF4C8DFF;
 
     private static final int REQ_EXPORT_SAVE = 1001;
+    private static final String STATE_PENDING_EXPORT = "pendingExport";
 
     private static final String JS =
             "(function(){if(window.__PI__)return;window.__PI__=1;"
@@ -208,13 +210,14 @@ public class MainActivity extends Activity {
     // 页面 CSP 的 script-src 不含 'unsafe-eval' 时，页面里的 eval() 会被拦。
     // 每换一次文档重新探测，避免上一个站点的结论串到下一个站点。
     private boolean evalCspBlocked = false;
-    /** 「保存到文件」选择完位置后，onActivityResult 用它写内容 */
-    private String pendingExport;
+    /** 仅保存缓存文件名，导出正文可能超过 Activity 状态的大小限制。 */
+    private String pendingExportName;
     private View rootView;
 
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
+        if (b != null) pendingExportName = b.getString(STATE_PENDING_EXPORT);
         installCrashHandler();
         // 自己就是调试工具，开着让 chrome://inspect 也能接进来做对照
         WebView.setWebContentsDebuggingEnabled(true);
@@ -1835,16 +1838,34 @@ public class MainActivity extends Activity {
     }
 
     private void saveExport(String text) {
-        pendingExport = text;
+        if (pendingExportName != null) return;
         Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
         i.addCategory(Intent.CATEGORY_OPENABLE);
         i.setType("text/plain");
         i.putExtra(Intent.EXTRA_TITLE, "phoneinspect-" + exportStamp() + ".txt");
         try {
+            File pending = File.createTempFile("pending-export-", ".txt", getCacheDir());
+            pendingExportName = pending.getName();
+            try (FileOutputStream out = new FileOutputStream(pending)) {
+                out.write(text.getBytes("UTF-8"));
+            }
             startActivityForResult(i, REQ_EXPORT_SAVE);
-        } catch (Throwable t) {
-            pendingExport = null;
-            Toast.makeText(this, "打不开文件选择器：" + t, Toast.LENGTH_SHORT).show();
+        } catch (Exception e) {
+            clearPendingExport();
+            Toast.makeText(this, "无法开始保存：" + e, Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    @Override
+    protected void onSaveInstanceState(Bundle outState) {
+        super.onSaveInstanceState(outState);
+        outState.putString(STATE_PENDING_EXPORT, pendingExportName);
+    }
+
+    private void clearPendingExport() {
+        if (pendingExportName != null) {
+            new File(getCacheDir(), pendingExportName).delete();
+            pendingExportName = null;
         }
     }
 
@@ -1882,23 +1903,24 @@ public class MainActivity extends Activity {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode != REQ_EXPORT_SAVE) return;
 
-        String text = pendingExport;
-        pendingExport = null;
-        if (resultCode != RESULT_OK || data == null || data.getData() == null || text == null) {
+        if (resultCode != RESULT_OK || data == null || data.getData() == null) {
+            clearPendingExport();
             return;
         }
 
-        OutputStream os = null;
         try {
-            os = getContentResolver().openOutputStream(data.getData());
-            if (os == null) throw new Exception("无法写入所选位置");
-            os.write(text.getBytes("UTF-8"));
-            os.flush();
+            if (pendingExportName == null) throw new Exception("导出内容已丢失");
+            File pending = new File(getCacheDir(), pendingExportName);
+            if (!pending.isFile()) throw new Exception("导出内容已丢失");
+            try (OutputStream out = getContentResolver().openOutputStream(data.getData())) {
+                if (out == null) throw new Exception("无法写入所选位置");
+                Files.copy(pending.toPath(), out);
+            }
             Toast.makeText(this, "已保存", Toast.LENGTH_SHORT).show();
-        } catch (Throwable t) {
-            Toast.makeText(this, "保存失败：" + t, Toast.LENGTH_SHORT).show();
+        } catch (Exception e) {
+            Toast.makeText(this, "保存失败：" + e, Toast.LENGTH_SHORT).show();
         } finally {
-            try { if (os != null) os.close(); } catch (Throwable ignored) { }
+            clearPendingExport();
         }
     }
 
